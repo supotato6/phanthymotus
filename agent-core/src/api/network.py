@@ -1,0 +1,502 @@
+"""
+network.py — 网络配置管理（WiFi 扫描/连接/断开，接口状态）。
+
+通过 Python dbus 直接与 NetworkManager D-Bus API 通信。
+容器需要 network_mode: host + /var/run/dbus/system_bus_socket 挂载。
+"""
+
+import asyncio
+import sys
+import urllib.parse
+
+import fastapi
+from pydantic import BaseModel
+
+import config
+
+# dbus-python 安装在系统 dist-packages，若 venv 无 system.pth 则手动加入
+if '/usr/lib/python3/dist-packages' not in sys.path:
+    sys.path.append('/usr/lib/python3/dist-packages')
+
+router = fastapi.APIRouter(prefix='/network', tags=['network'])
+
+_WIFI_STORE_KEY = 'wifi_saved'
+
+# ── DB persistence ────────────────────────────────────────────────────────────
+
+
+def _get_wifi_store() -> dict:
+    """获取已保存的 WiFi 配置 {ssid: {password, auto_connect}}。"""
+    return config.main.get(_WIFI_STORE_KEY, {})
+
+
+def _save_wifi_entry(ssid: str, password: str, auto_connect: bool):
+    """持久化 WiFi 凭据到数据库。"""
+    store = _get_wifi_store()
+    store[ssid] = {'password': password, 'auto_connect': auto_connect}
+    config.main[_WIFI_STORE_KEY] = store
+
+
+def _remove_wifi_entry(name: str):
+    """从数据库中删除 WiFi 凭据。"""
+    store = _get_wifi_store()
+    store.pop(name, None)
+    config.main[_WIFI_STORE_KEY] = store
+
+
+# ── NetworkManager D-Bus helpers ──────────────────────────────────────────────
+
+NM_IFACE = 'org.freedesktop.NetworkManager'
+NM_PATH = '/org/freedesktop/NetworkManager'
+NM_SETTINGS_PATH = '/org/freedesktop/NetworkManager/Settings'
+NM_SETTINGS_IFACE = 'org.freedesktop.NetworkManager.Settings'
+NM_CONN_IFACE = 'org.freedesktop.NetworkManager.Settings.Connection'
+NM_DEVICE_IFACE = 'org.freedesktop.NetworkManager.Device'
+NM_WIRELESS_IFACE = 'org.freedesktop.NetworkManager.Device.Wireless'
+NM_AP_IFACE = 'org.freedesktop.NetworkManager.AccessPoint'
+NM_ACTIVE_IFACE = 'org.freedesktop.NetworkManager.Connection.Active'
+NM_IP4_IFACE = 'org.freedesktop.NetworkManager.IP4Config'
+DBUS_PROPS_IFACE = 'org.freedesktop.DBus.Properties'
+
+# Device type constants
+NM_DEVICE_TYPE_ETHERNET = 1
+NM_DEVICE_TYPE_WIFI = 2
+
+# Device state constants
+NM_DEVICE_STATE_ACTIVATED = 100
+NM_DEVICE_STATE_DISCONNECTED = 30
+NM_DEVICE_STATE_UNAVAILABLE = 20
+NM_DEVICE_STATE_UNMANAGED = 10
+
+_DEVICE_TYPE_NAMES = {
+    NM_DEVICE_TYPE_ETHERNET: 'ethernet',
+    NM_DEVICE_TYPE_WIFI: 'wifi',
+    13: 'bridge',  # NM_DEVICE_TYPE_BRIDGE
+    14: 'generic',  # NM_DEVICE_TYPE_GENERIC
+}
+
+# Device types to exclude from the interface list
+_DEVICE_TYPE_HIDDEN = {13, 14, 22}  # bridge, generic, dummy
+
+_DEVICE_STATE_NAMES = {
+    NM_DEVICE_STATE_ACTIVATED: 'connected',
+    NM_DEVICE_STATE_DISCONNECTED: 'disconnected',
+    NM_DEVICE_STATE_UNAVAILABLE: 'unavailable',
+    NM_DEVICE_STATE_UNMANAGED: 'unmanaged',
+}
+
+
+def _get_bus():
+    import dbus
+    return dbus.SystemBus()
+
+
+def _get_prop(bus, obj_path, iface, prop):
+    import dbus
+    obj = bus.get_object(NM_IFACE, obj_path)
+    props = dbus.Interface(obj, DBUS_PROPS_IFACE)
+    return props.Get(iface, prop)
+
+
+def _get_all_props(bus, obj_path, iface):
+    import dbus
+    obj = bus.get_object(NM_IFACE, obj_path)
+    props = dbus.Interface(obj, DBUS_PROPS_IFACE)
+    return props.GetAll(iface)
+
+
+def _bytes_to_ssid(ssid_bytes) -> str:
+    """Convert dbus byte array to string."""
+    return bytes(ssid_bytes).decode('utf-8', errors='replace')
+
+
+def _get_devices_sync() -> list[dict]:
+    """Get all network devices with status, including IP/mask/gateway/MAC."""
+    bus = _get_bus()
+    devices_paths = _get_prop(bus, NM_PATH, NM_IFACE, 'Devices')
+    results = []
+    for dev_path in devices_paths:
+        props = _get_all_props(bus, dev_path, NM_DEVICE_IFACE)
+        dev_type = int(props.get('DeviceType', 0))
+        if dev_type in _DEVICE_TYPE_HIDDEN:
+            continue
+        if dev_type not in _DEVICE_TYPE_NAMES:
+            continue
+        state = int(props.get('State', 0))
+        iface_name = str(props.get('Interface', ''))
+        mac = str(props.get('HwAddress', ''))
+        # Fallback: read MAC from sysfs (NM < 1.24 may return empty HwAddress)
+        if not mac:
+            try:
+                with open(f'/sys/class/net/{iface_name}/address') as f:
+                    mac = f.read().strip()
+            except Exception:
+                pass
+
+        # Get active connection name
+        connection_name = ''
+        active_conn_path = str(props.get('ActiveConnection', ''))
+        if active_conn_path and active_conn_path != '/':
+            try:
+                conn_props = _get_all_props(bus, active_conn_path, NM_ACTIVE_IFACE)
+                connection_name = str(conn_props.get('Id', ''))
+            except Exception:
+                pass
+
+        # Get IP info if activated
+        ip = ''
+        mask = ''
+        gateway = ''
+        if state == NM_DEVICE_STATE_ACTIVATED:
+            ip4_path = str(props.get('Ip4Config', ''))
+            if ip4_path and ip4_path != '/':
+                try:
+                    ip4_props = _get_all_props(bus, ip4_path, NM_IP4_IFACE)
+                    addresses = ip4_props.get('AddressData', [])
+                    if addresses:
+                        addr = addresses[0]
+                        ip = str(addr.get('address', ''))
+                        prefix = int(addr.get('prefix', 0))
+                        # Convert prefix to subnet mask
+                        mask = _prefix_to_mask(prefix)
+                    gateway = str(ip4_props.get('Gateway', ''))
+                except Exception:
+                    pass
+
+        results.append({
+            'device': iface_name,
+            'type': _DEVICE_TYPE_NAMES.get(dev_type, 'unknown'),
+            'state': _DEVICE_STATE_NAMES.get(state, f'unknown({state})'),
+            'connection': connection_name,
+            'mac': mac,
+            'ip': ip,
+            'mask': mask,
+            'gateway': gateway,
+        })
+    return results
+
+
+def _prefix_to_mask(prefix: int) -> str:
+    """Convert CIDR prefix length to dotted subnet mask."""
+    bits = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+    return f"{(bits >> 24) & 0xFF}.{(bits >> 16) & 0xFF}.{(bits >> 8) & 0xFF}.{bits & 0xFF}"
+
+
+def _get_wifi_device_path(bus) -> str | None:
+    """Find the first WiFi device path."""
+    devices_paths = _get_prop(bus, NM_PATH, NM_IFACE, 'Devices')
+    for dev_path in devices_paths:
+        dev_type = int(_get_prop(bus, dev_path, NM_DEVICE_IFACE, 'DeviceType'))
+        if dev_type == NM_DEVICE_TYPE_WIFI:
+            return str(dev_path)
+    return None
+
+
+def _scan_wifi_sync() -> list[dict]:
+    """Scan and list WiFi access points."""
+    import dbus
+    bus = _get_bus()
+    wifi_path = _get_wifi_device_path(bus)
+    if not wifi_path:
+        raise RuntimeError('未找到 WiFi 适配器')
+
+    # Request scan
+    wifi_obj = bus.get_object(NM_IFACE, wifi_path)
+    wifi_iface = dbus.Interface(wifi_obj, NM_WIRELESS_IFACE)
+    try:
+        wifi_iface.RequestScan({})
+        # Give scan a moment
+        import time
+        time.sleep(2)
+    except Exception:
+        pass  # Scan may already be in progress
+
+    # Get current active AP
+    active_ap = ''
+    try:
+        active_ap = str(_get_prop(bus, wifi_path, NM_WIRELESS_IFACE, 'ActiveAccessPoint'))
+    except Exception:
+        pass
+
+    # Get access points
+    aps = wifi_iface.GetAccessPoints()
+    networks = []
+    seen_ssids = set()
+    for ap_path in aps:
+        ap_props = _get_all_props(bus, str(ap_path), NM_AP_IFACE)
+        ssid_bytes = ap_props.get('Ssid', [])
+        ssid = _bytes_to_ssid(ssid_bytes)
+        if not ssid or ssid in seen_ssids:
+            continue
+        seen_ssids.add(ssid)
+
+        signal = int(ap_props.get('Strength', 0))
+        flags = int(ap_props.get('Flags', 0))
+        wpa_flags = int(ap_props.get('WpaFlags', 0))
+        rsn_flags = int(ap_props.get('RsnFlags', 0))
+
+        # Determine security type
+        security = ''
+        if rsn_flags != 0:
+            security = 'WPA2'
+        elif wpa_flags != 0:
+            security = 'WPA'
+        elif flags & 0x1:  # NM_802_11_AP_FLAGS_PRIVACY
+            security = 'WEP'
+
+        in_use = (str(ap_path) == active_ap)
+        networks.append({
+            'ssid': ssid,
+            'signal': signal,
+            'security': security,
+            'in_use': in_use,
+        })
+
+    networks.sort(key=lambda x: (-x['in_use'], -x['signal']))
+    return networks
+
+
+def _connect_wifi_sync(ssid: str, password: str, auto_connect: bool) -> str:
+    """Connect to a WiFi network. Returns success message or raises."""
+    import dbus
+    bus = _get_bus()
+    wifi_path = _get_wifi_device_path(bus)
+    if not wifi_path:
+        raise RuntimeError('未找到 WiFi 适配器')
+
+    # Find the AP with matching SSID
+    wifi_obj = bus.get_object(NM_IFACE, wifi_path)
+    wifi_iface = dbus.Interface(wifi_obj, NM_WIRELESS_IFACE)
+    aps = wifi_iface.GetAccessPoints()
+    target_ap = None
+    for ap_path in aps:
+        ap_ssid = _bytes_to_ssid(_get_prop(bus, str(ap_path), NM_AP_IFACE, 'Ssid'))
+        if ap_ssid == ssid:
+            target_ap = str(ap_path)
+            break
+
+    if not target_ap:
+        raise RuntimeError(f'未找到网络 "{ssid}"，请先扫描')
+
+    # Build connection settings
+    conn_settings = dbus.Dictionary({
+        'connection': dbus.Dictionary({
+            'id': ssid,
+            'type': '802-11-wireless',
+            'autoconnect': dbus.Boolean(auto_connect),
+        }),
+        '802-11-wireless': dbus.Dictionary({
+            'ssid': dbus.ByteArray(ssid.encode('utf-8')),
+            'mode': 'infrastructure',
+        }),
+    })
+
+    if password:
+        conn_settings['802-11-wireless-security'] = dbus.Dictionary({
+            'key-mgmt': 'wpa-psk',
+            'psk': password,
+        })
+        conn_settings['802-11-wireless']['security'] = '802-11-wireless-security'
+
+    # Use AddAndActivateConnection
+    nm_obj = bus.get_object(NM_IFACE, NM_PATH)
+    nm_iface = dbus.Interface(nm_obj, NM_IFACE)
+    nm_iface.AddAndActivateConnection(conn_settings, dbus.ObjectPath(wifi_path), dbus.ObjectPath(target_ap))
+
+    return f'已连接到 {ssid}'
+
+
+def _disconnect_wifi_sync():
+    """Disconnect the WiFi device."""
+    import dbus
+    bus = _get_bus()
+    wifi_path = _get_wifi_device_path(bus)
+    if not wifi_path:
+        raise RuntimeError('未找到 WiFi 接口')
+
+    nm_obj = bus.get_object(NM_IFACE, NM_PATH)
+    nm_iface = dbus.Interface(nm_obj, NM_IFACE)
+    nm_iface.DeactivateConnection(
+        _get_prop(bus, wifi_path, NM_DEVICE_IFACE, 'ActiveConnection')
+    )
+
+
+def _get_saved_wifi_sync() -> list[dict]:
+    """List saved WiFi connections from NetworkManager."""
+    import dbus
+    bus = _get_bus()
+    settings_obj = bus.get_object(NM_IFACE, NM_SETTINGS_PATH)
+    settings_iface = dbus.Interface(settings_obj, NM_SETTINGS_IFACE)
+    connections = settings_iface.ListConnections()
+
+    results = []
+    for conn_path in connections:
+        conn_obj = bus.get_object(NM_IFACE, str(conn_path))
+        conn_iface = dbus.Interface(conn_obj, NM_CONN_IFACE)
+        settings = conn_iface.GetSettings()
+        conn_type = str(settings.get('connection', {}).get('type', ''))
+        if conn_type == '802-11-wireless':
+            name = str(settings.get('connection', {}).get('id', ''))
+            results.append({'name': name})
+    return results
+
+
+def _delete_connection_sync(name: str):
+    """Delete a saved connection by name."""
+    import dbus
+    bus = _get_bus()
+    settings_obj = bus.get_object(NM_IFACE, NM_SETTINGS_PATH)
+    settings_iface = dbus.Interface(settings_obj, NM_SETTINGS_IFACE)
+    connections = settings_iface.ListConnections()
+
+    for conn_path in connections:
+        conn_obj = bus.get_object(NM_IFACE, str(conn_path))
+        conn_iface = dbus.Interface(conn_obj, NM_CONN_IFACE)
+        settings = conn_iface.GetSettings()
+        conn_id = str(settings.get('connection', {}).get('id', ''))
+        if conn_id == name:
+            conn_iface.Delete()
+            return
+    raise RuntimeError(f'未找到连接 "{name}"')
+
+
+def _get_status_sync() -> list[dict]:
+    """Get IP/gateway/DNS for active connections."""
+    bus = _get_bus()
+    devices_paths = _get_prop(bus, NM_PATH, NM_IFACE, 'Devices')
+    connections = []
+    for dev_path in devices_paths:
+        dev_props = _get_all_props(bus, dev_path, NM_DEVICE_IFACE)
+        state = int(dev_props.get('State', 0))
+        if state != NM_DEVICE_STATE_ACTIVATED:
+            continue
+        dev_type = int(dev_props.get('DeviceType', 0))
+        if dev_type not in _DEVICE_TYPE_NAMES:
+            continue
+
+        iface_name = str(dev_props.get('Interface', ''))
+        ip4_path = str(dev_props.get('Ip4Config', ''))
+        if not ip4_path or ip4_path == '/':
+            continue
+
+        try:
+            ip4_props = _get_all_props(bus, ip4_path, NM_IP4_IFACE)
+            addresses = ip4_props.get('AddressData', [])
+            gateway = str(ip4_props.get('Gateway', ''))
+            dns_data = ip4_props.get('NameserverData', [])
+
+            ip_str = ''
+            if addresses:
+                addr = addresses[0]
+                ip_str = f"{addr.get('address', '')}/{addr.get('prefix', '')}"
+
+            dns_list = [str(d.get('address', '')) for d in dns_data]
+
+            connections.append({
+                'device': iface_name,
+                'ip': ip_str,
+                'gateway': gateway,
+                'dns': dns_list,
+            })
+        except Exception:
+            pass
+    return connections
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.get('/interfaces')
+async def get_interfaces():
+    """列出所有网络接口及连接状态。"""
+    try:
+        loop = asyncio.get_event_loop()
+        interfaces = await loop.run_in_executor(None, _get_devices_sync)
+        return {'code': 200, 'data': {'interfaces': interfaces}}
+    except Exception as e:
+        return {'code': 500, 'data': {'error': str(e)}}
+
+
+@router.get('/status')
+async def get_status():
+    """获取当前活跃连接的 IP/网关/DNS 信息。"""
+    try:
+        loop = asyncio.get_event_loop()
+        connections = await loop.run_in_executor(None, _get_status_sync)
+        return {'code': 200, 'data': {'connections': connections}}
+    except Exception as e:
+        return {'code': 500, 'data': {'error': str(e)}}
+
+
+@router.get('/wifi/scan')
+async def wifi_scan():
+    """扫描可用 WiFi 网络。"""
+    try:
+        loop = asyncio.get_event_loop()
+        networks = await loop.run_in_executor(None, _scan_wifi_sync)
+        return {'code': 200, 'data': {'networks': networks}}
+    except Exception as e:
+        return {'code': 500, 'data': {'error': str(e)}}
+
+
+class WifiConnectRequest(BaseModel):
+    ssid: str
+    password: str = ''
+    auto_connect: bool = True
+
+
+@router.post('/wifi/connect')
+async def wifi_connect(req: WifiConnectRequest):
+    """连接到指定 WiFi 网络。"""
+    try:
+        loop = asyncio.get_event_loop()
+        msg = await loop.run_in_executor(
+            None, _connect_wifi_sync, req.ssid, req.password, req.auto_connect)
+        # 持久化到数据库
+        _save_wifi_entry(req.ssid, req.password, req.auto_connect)
+        return {'code': 200, 'data': {'success': True, 'message': msg}}
+    except Exception as e:
+        return {'code': 500, 'data': {'error': str(e), 'success': False}}
+
+
+@router.post('/wifi/disconnect')
+async def wifi_disconnect():
+    """断开当前 WiFi 连接。"""
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _disconnect_wifi_sync)
+        return {'code': 200, 'data': {'success': True, 'message': 'WiFi 已断开'}}
+    except Exception as e:
+        return {'code': 500, 'data': {'error': str(e)}}
+
+
+@router.get('/wifi/saved')
+async def wifi_saved():
+    """列出已保存的 WiFi 连接（合并 NM 与数据库）。"""
+    try:
+        loop = asyncio.get_event_loop()
+        connections = await loop.run_in_executor(None, _get_saved_wifi_sync)
+        nm_names = {c['name'] for c in connections}
+
+        # 补充数据库中有但 NM 中没有的（例如容器重建后）
+        store = _get_wifi_store()
+        for ssid in store:
+            if ssid not in nm_names:
+                connections.append({'name': ssid, 'db_only': True})
+
+        return {'code': 200, 'data': {'connections': connections}}
+    except Exception as e:
+        return {'code': 500, 'data': {'error': str(e)}}
+
+
+@router.delete('/wifi/saved/{name:path}')
+async def wifi_forget(name: str):
+    """删除已保存的 WiFi 连接。"""
+    name = urllib.parse.unquote(name)
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _delete_connection_sync, name)
+    except Exception:
+        pass  # NM 中可能不存在（db_only 条目）
+    # 同时从数据库删除
+    _remove_wifi_entry(name)
+    return {'code': 200, 'data': {'success': True, 'message': f'已删除 {name}'}}
