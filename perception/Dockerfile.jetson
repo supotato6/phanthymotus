@@ -44,20 +44,20 @@ RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
 
 # ── VITS2 model download ──────────────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
-RUN mkdir -p /models/vits2-mix && \
+RUN mkdir -p /models/vits2-mix/vits2_src/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
     cd /models/vits2-mix && \
-    for f in G_B_final_int8.pth config.json; do \
-        curl -fsSL -o "$f" "${MODEL_BASE_URL}/$f" || echo "WARNING: failed to download $f"; \
+    curl -fsSL -o G_B_final_int8.pth "${MODEL_BASE_URL}/G_B_final_int8.pth" && \
+    curl -fsSL -o config.json "${MODEL_BASE_URL}/config.json" && \
+    for f in models.py modules.py commons.py attentions.py transforms.py stft.py utils.py monotonic_align.py; do \
+        curl -fsSL -o "vits2_src/$f" "${MODEL_BASE_URL}/vits2_src/$f"; \
     done && \
-    for d in vits2_src frontend tn_cache; do \
-        mkdir -p "$d" && \
-        for f in $(curl -s "${MODEL_BASE_URL}/$d/" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep -v '/$'); do \
-            curl -fsSL -o "$d/$f" "${MODEL_BASE_URL}/$d/$f" || echo "WARNING: failed to download $d/$f"; \
-        done; \
+    curl -fsSL -o vits2_src/text/__init__.py "${MODEL_BASE_URL}/vits2_src/text/__init__.py" && \
+    curl -fsSL -o vits2_src/text/symbols.py "${MODEL_BASE_URL}/vits2_src/text/symbols.py" && \
+    for f in __init__.py cleaner.py chinese.py english.py heteronym.py tone_sandhi.py unified_g2p.py symbols.py cmudict.rep cmudict_cache.pickle opencop-strict.txt; do \
+        curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/$f" || curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/frontend/$f"; \
     done && \
-    # Also download vits2_src/text/ subdirectory
-    for f in $(curl -s "${MODEL_BASE_URL}/vits2_src/text/" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep -v '/$'); do \
-        curl -fsSL -o "vits2_src/text/$f" "${MODEL_BASE_URL}/vits2_src/text/$f" || echo "WARNING: failed to download vits2_src/text/$f"; \
+    for f in zh_tn_tagger.fst zh_tn_verbalizer.fst en_tn_tagger.fst en_tn_verbalizer.fst; do \
+        curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
     ls -lhR /models/vits2-mix/
 

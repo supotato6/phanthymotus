@@ -110,9 +110,6 @@ class Vits2Int8Adapter(TTSAdapter):
     """VITS2-Mix INT8 PyTorch TTS adapter for G_B_final_int8.pth."""
 
     def __init__(self, model_dir: str, speaker_id: int = 0, speed: float = 1.0):
-        from utils.model_downloader import ensure_model
-        ensure_model("vits2", model_dir)
-
         _model_path = os.path.join(model_dir, "G_B_final_int8.pth")
         _config_path = os.path.join(model_dir, "config.json")
 
