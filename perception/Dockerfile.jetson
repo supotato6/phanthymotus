@@ -43,14 +43,23 @@ RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     numpy scipy pypinyin jieba cn2an soundfile
 
 # ── VITS2 model download ──────────────────────────────────────────
-# Model URL: http://172.28.4.81:34567/zhangjinghong/vits2/G_B_final_int8.pth
-ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2
+ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
 RUN mkdir -p /models/vits2-mix && \
     cd /models/vits2-mix && \
     for f in G_B_final_int8.pth config.json; do \
         curl -fsSL -o "$f" "${MODEL_BASE_URL}/$f" || echo "WARNING: failed to download $f"; \
     done && \
-    ls -lh /models/vits2-mix/
+    for d in vits2_src frontend tn_cache; do \
+        mkdir -p "$d" && \
+        for f in $(curl -s "${MODEL_BASE_URL}/$d/" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep -v '/$'); do \
+            curl -fsSL -o "$d/$f" "${MODEL_BASE_URL}/$d/$f" || echo "WARNING: failed to download $d/$f"; \
+        done; \
+    done && \
+    # Also download vits2_src/text/ subdirectory
+    for f in $(curl -s "${MODEL_BASE_URL}/vits2_src/text/" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep -v '/$'); do \
+        curl -fsSL -o "vits2_src/text/$f" "${MODEL_BASE_URL}/vits2_src/text/$f" || echo "WARNING: failed to download vits2_src/text/$f"; \
+    done && \
+    ls -lhR /models/vits2-mix/
 
 # ── Application code ───────────────────────────────────────────────
 WORKDIR /work
