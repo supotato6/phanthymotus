@@ -53,9 +53,10 @@ RUN mkdir -p /models/vits2-mix/vits2_src/text /models/vits2-mix/frontend /models
     done && \
     curl -fsSL -o vits2_src/text/__init__.py "${MODEL_BASE_URL}/vits2_src/text/__init__.py" && \
     curl -fsSL -o vits2_src/text/symbols.py "${MODEL_BASE_URL}/vits2_src/text/symbols.py" && \
-    for f in __init__.py cleaner.py chinese.py english.py heteronym.py tone_sandhi.py unified_g2p.py symbols.py cmudict.rep cmudict_cache.pickle opencop-strict.txt; do \
-        curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/$f" || curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/frontend/$f"; \
+    for f in __init__.py cleaner.py chinese.py english.py heteronym.py tone_sandhi.py unified_g2p.py symbols.py cmudict.rep cmudict_cache.pickle; do \
+        curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/frontend/$f"; \
     done && \
+    curl -fsSL -o frontend/opencpop-strict.txt "${MODEL_BASE_URL}/opencpop-strict.txt" && \
     for f in zh_tn_tagger.fst zh_tn_verbalizer.fst en_tn_tagger.fst en_tn_verbalizer.fst; do \
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
