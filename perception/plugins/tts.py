@@ -113,7 +113,7 @@ class Vits2Int8Adapter(TTSAdapter):
         _model_path = os.path.join(model_dir, "G_B_final_int8.pth")
         _config_path = os.path.join(model_dir, "config.json")
 
-        _vits2_path = os.path.join(model_dir, "vits2_src")
+        _vits2_path = os.path.join(model_dir, "vits2")
         if os.path.isdir(_vits2_path):
             sys.path.insert(0, _vits2_path)
         from vits2 import models, commons

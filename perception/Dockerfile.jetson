@@ -44,15 +44,15 @@ RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
 
 # ── VITS2 model download ──────────────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
-RUN mkdir -p /models/vits2-mix/vits2_src/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
+RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
     cd /models/vits2-mix && \
     curl -fsSL -o G_B_final_int8.pth "${MODEL_BASE_URL}/G_B_final_int8.pth" && \
     curl -fsSL -o config.json "${MODEL_BASE_URL}/config.json" && \
     for f in models.py modules.py commons.py attentions.py transforms.py stft.py utils.py monotonic_align.py; do \
-        curl -fsSL -o "vits2_src/$f" "${MODEL_BASE_URL}/vits2_src/$f"; \
+        curl -fsSL -o "vits2/$f" "${MODEL_BASE_URL}/vits2_src/$f"; \
     done && \
-    curl -fsSL -o vits2_src/text/__init__.py "${MODEL_BASE_URL}/vits2_src/text/__init__.py" && \
-    curl -fsSL -o vits2_src/text/symbols.py "${MODEL_BASE_URL}/vits2_src/text/symbols.py" && \
+    curl -fsSL -o vits2/text/__init__.py "${MODEL_BASE_URL}/vits2_src/text/__init__.py" && \
+    curl -fsSL -o vits2/text/symbols.py "${MODEL_BASE_URL}/vits2_src/text/symbols.py" && \
     for f in __init__.py cleaner.py chinese.py english.py heteronym.py tone_sandhi.py unified_g2p.py symbols.py cmudict.rep cmudict_cache.pickle; do \
         curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/frontend/$f"; \
     done && \
