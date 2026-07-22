@@ -114,8 +114,13 @@ class Vits2Int8Adapter(TTSAdapter):
         _config_path = os.path.join(model_dir, "config.json")
 
         sys.path.insert(0, model_dir)
+        from vits2 import models, commons
         from vits2.text import symbols
         from vits2 import utils as vits2_utils
+        from frontend.cleaner import clean_text_mix
+        from frontend import cleaned_text_to_sequence_mix
+        self._clean_text = clean_text_mix
+        self._seq_mix = cleaned_text_to_sequence_mix
 
         hps = vits2_utils.get_hparams_from_file(_config_path)
 
@@ -150,11 +155,6 @@ class Vits2Int8Adapter(TTSAdapter):
         self._commons = commons
         self._spk = torch.tensor([speaker_id], dtype=torch.long, device="cuda")
         self._speed = speed
-
-        from frontend.cleaner import clean_text_mix
-        from frontend import cleaned_text_to_sequence_mix
-        self._clean_text = clean_text_mix
-        self._seq_mix = cleaned_text_to_sequence_mix
 
         log.info(f"[tts] VITS2 INT8 loaded: {_model_path}, "
                  f"params={sum(p.numel() for p in net.parameters())/1e6:.1f}M")
