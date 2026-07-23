@@ -2,46 +2,16 @@ mcp_port: 15720
 
 plugins:
   asr:
-    enabled: true
-    asr_model: paraformer-zh-en   # paraformer-zh-en | zipformer-en | sensevoice-small
-    model_dir: /models/sherpa-onnx/asr
-    hw_provider: cpu
-    num_threads: 2
-    language: zh-CN
-    vad:
-      model: sherpa_onnx    # sherpa_onnx (ONNX, lightweight) | silero (PyTorch) | webrtc
-      threshold: 0.5
-      silence_ms: 400
-    kws:
-      enabled: true
-      model_dir: /models/sherpa-onnx/kws
-      keywords:
-        - "x iǎo f àn x iǎo f àn @小范小范"
+    enabled: false
 
   tts:
     enabled: true
-    model_dir: /models/sherpa-onnx/tts
+    model_dir: /models/vits2-mix
     speaker_id: 0
     speed: 1.0
 
   htmsg:
-    enabled: true
-    namespace: ""       # auto-detect from hostname if empty
-    keyframe:
-      dist_thresh: 1.0    # meters — insert keyframe when moved this far
-      angle_thresh: 0.35  # radians (~20°) — or rotated this much
-    semantic:
-      model: "mobileclip"
-      sam_model: "sam2_tiny"
-      confidence_decay: 0.95
-    graph:
-      db_path: "/opt/phanthy-motus/data/htmsg"
-      max_nodes: 500
+    enabled: false
 
   vop:
-    enabled: true
-    namespace: ""       # auto-detect from hostname if empty
-    model: "yolov8s-worldv2"
-    confidence: 0.3
-    classes: []         # empty = default broad set
-    fps: 5
+    enabled: false
