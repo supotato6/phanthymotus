@@ -40,7 +40,7 @@ RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     pyyaml requests websockets webrtcvad websocket-client dashscope && \
     pip3 install --no-cache-dir --no-deps -i ${PYPI_MIRROR} silero-vad && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    numpy scipy pypinyin jieba cn2an soundfile wetext
+    numpy scipy pypinyin jieba cn2an soundfile wetext inflect g2p-en nltk
 
 # ── VITS2 model download ──────────────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
