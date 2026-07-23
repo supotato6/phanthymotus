@@ -63,7 +63,7 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     # Create minimal tn text-normalization stub (not in base image)
     TNPKG=$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
     mkdir -p $TNPKG && \
-    printf 'class Normalizer:\n    def normalize(self,text):\n        return text\n' > $TNPKG/normalizer.py && \
+    printf 'class Normalizer:\n    def __init__(self,**kw): pass\n    def normalize(self,t):\n        return t\n' > $TNPKG/normalizer.py && \
     touch $TNPKG/../__init__.py $TNPKG/__init__.py && \
     echo "tn stub created at $TNPKG" && \
     ls -lhR /models/vits2-mix/
