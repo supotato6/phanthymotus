@@ -1,48 +1,13 @@
-# ── Jetson GPU variant — VITS2 INT8 TTS ─────────────────────────────
-# Base: jetson-base:jp511-torch (torch 2.0 + torchvision 0.15 with CUDA)
-#
-# Build context: repo root
-# ────────────────────────────────────────────────────────────────────
+# ── VITS2 INT8 TTS (PyTorch) ─────────────────────────────────────
+# Builds on top of vits2-trt-jp6 which has:
+#   torch 2.6 + CUDA, ROS Jazzy, audio_msgs, Python 3.12
+#   G2P frontend, tn module, jieba/pypinyin/nltk/etc
+# ────────────────────────────────────────────────────────────────
 
-ARG PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
-ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
-ARG BASE_IMAGE=bj-warehouse.tencentcloudcr.com/phanthy-motus/jetson-base:jp511-torch
+ARG BASE_IMAGE=phanthymotus-perception-vits2-trt-jp6:b95cb81
 FROM ${BASE_IMAGE}
-ARG PYPI_MIRROR APT_MIRROR
 
-# ── APT mirror ─────────────────────────────────────────────────────
-RUN if [ -n "${APT_MIRROR}" ]; then \
-        sed -i "s/archive.ubuntu.com/${APT_MIRROR}/g; s/ports.ubuntu.com/${APT_MIRROR}/g" /etc/apt/sources.list; \
-    fi
-
-# ── Switch ROS2 to TUNA mirror ──
-RUN if ls /etc/apt/sources.list.d/*.list 1>/dev/null 2>&1; then \
-        sed -i 's|http://packages.ros.org/ros2/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu|g' /etc/apt/sources.list.d/*.list && \
-        sed -i 's|deb \[|deb [trusted=yes |g; s|deb http|deb [trusted=yes] http|g' /etc/apt/sources.list.d/ros2*.list; \
-    fi
-
-# ── System deps ────────────────────────────────────────────────────
-RUN rm -f /etc/apt/sources.list.d/* && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/* && \
-    apt-get -o Acquire::AllowInsecureRepositories=true update && \
-    apt-get install -y --no-install-recommends --allow-unauthenticated ffmpeg espeak-ng && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
-
-RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} colcon-common-extensions "empy<4"
-
-# ── audio_msgs ROS2 package ──────────────────────────────────────
-COPY deploy/ros-base/audio_msgs/ /ros_ws/src/audio_msgs/
-RUN cd /ros_ws && \
-    . /opt/ros/humble/install/setup.bash && \
-    colcon build --packages-select audio_msgs --cmake-args -DCMAKE_BUILD_TYPE=Release
-
-# ── Python deps ────────────────────────────────────────────────────
-RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    pyyaml requests websockets webrtcvad websocket-client dashscope && \
-    pip3 install --no-cache-dir --no-deps -i ${PYPI_MIRROR} silero-vad && \
-    pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    numpy scipy pypinyin jieba cn2an soundfile wetext inflect g2p-en nltk
-
-# ── VITS2 model download ──────────────────────────────────────────
+# ── VITS2 INT8 model download ──────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
 RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
     cd /models/vits2-mix && \
@@ -60,33 +25,22 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     for f in zh_tn_tagger.fst zh_tn_verbalizer.fst en_tn_tagger.fst en_tn_verbalizer.fst; do \
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
-    # Create minimal tn text-normalization stub (not in base image)
-    TNPKG=$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
-    mkdir -p $TNPKG && \
-    printf 'class Normalizer:\n    def __init__(self,**kw): pass\n    def normalize(self,t):\n        return t\n' > $TNPKG/normalizer.py && \
-    touch $TNPKG/../__init__.py $TNPKG/__init__.py && \
-    echo "tn stub created at $TNPKG" && \
-    ls -lhR /models/vits2-mix/
+    echo "=== Model files ===" && \
+    ls -lh G_B_final_int8.pth config.json && \
+    ls vits2/ frontend/ tn_cache/ && \
+    echo "=== OK ==="
 
-# ── Application code ───────────────────────────────────────────────
+# ── Application code ───────────────────────────────────────────
 WORKDIR /work
 COPY perception/main.py    /work/main.py
 COPY perception/plugins/   /work/plugins/
 COPY perception/utils/     /work/utils/
 COPY perception/config.yaml /work/config.yaml
 
-EXPOSE 15720
-EXPOSE 15721
-
-# ROS2 Python paths
-RUN find /ros_ws/install -name "site-packages" -type d > /usr/local/lib/python3.8/dist-packages/ros_ws.pth && \
-    find /opt/ros/humble/install -name "site-packages" -type d >> /usr/local/lib/python3.8/dist-packages/ros_ws.pth
-
-ENV LD_LIBRARY_PATH="/ros_ws/install/audio_msgs/lib:/opt/ros/humble/install/lib:${LD_LIBRARY_PATH}"
-ENV AMENT_PREFIX_PATH="/ros_ws/install/audio_msgs:/opt/ros/humble/install"
+EXPOSE 15720 15721
 
 CMD ["/bin/bash", "-c", \
-    "export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 && \
-     source /opt/ros/humble/install/setup.bash && \
+    "source /opt/ros/jazzy/setup.bash && \
      source /ros_ws/install/setup.bash && \
-     python3 /work/main.py"]
+     export TTS_PLUGIN=tts && \
+     exec python3 /work/main.py"]
