@@ -1,13 +1,30 @@
-# ── VITS2 INT8 TTS (PyTorch) ─────────────────────────────────────
-# Builds on top of vits2-trt-jp6 which has:
-#   torch 2.6 + CUDA, ROS Jazzy, audio_msgs, Python 3.12
-#   G2P frontend, tn module, jieba/pypinyin/nltk/etc
+# ── VITS2 INT8 TTS ──────────────────────────────────────────────
+# Base: official phanthy-motus perception (jp511-torch, ROS Humble)
+# Overlays VITS2-Mix INT8 model + G2P frontend
 # ────────────────────────────────────────────────────────────────
 
-ARG BASE_IMAGE=phanthymotus-perception-vits2-trt-jp6:b95cb81
+ARG BASE_IMAGE=bj-warehouse.tencentcloudcr.com/phanthy-motus/jetson-base:jp511-torch
 FROM ${BASE_IMAGE}
 
-# ── VITS2 INT8 model download ──────────────────────────────────
+# ── System deps ────────────────────────────────────────────────
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends espeak-ng ffmpeg && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ── audio_msgs ──────────────────────────────────────────────────
+COPY deploy/ros-base/audio_msgs/ /ros_ws/src/audio_msgs/
+RUN cd /ros_ws && \
+    . /opt/ros/humble/install/setup.bash && \
+    colcon build --packages-select audio_msgs --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# ── Python deps (--no-deps for torch safety) ──────────────────
+RUN pip3 install --no-cache-dir \
+    pyyaml requests websockets dashscope && \
+    pip3 install --no-cache-dir --no-deps silero-vad && \
+    pip3 install --no-cache-dir \
+    numpy scipy pypinyin jieba soundfile wetext inflect g2p-en nltk cn2an
+
+# ── VITS2 model + source download ──────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
 RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
     cd /models/vits2-mix && \
@@ -25,10 +42,7 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     for f in zh_tn_tagger.fst zh_tn_verbalizer.fst en_tn_tagger.fst en_tn_verbalizer.fst; do \
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
-    echo "=== Model files ===" && \
-    ls -lh G_B_final_int8.pth config.json && \
-    ls vits2/ frontend/ tn_cache/ && \
-    echo "=== OK ==="
+    echo "Model files:" && ls -lh G_B_final_int8.pth config.json
 
 # ── Application code ───────────────────────────────────────────
 WORKDIR /work
@@ -39,8 +53,14 @@ COPY perception/config.yaml /work/config.yaml
 
 EXPOSE 15720 15721
 
+RUN find /ros_ws/install -name "site-packages" -type d > /usr/local/lib/python3.8/dist-packages/ros_ws.pth && \
+    find /opt/ros/humble/install -name "site-packages" -type d >> /usr/local/lib/python3.8/dist-packages/ros_ws.pth
+
+ENV LD_LIBRARY_PATH="/ros_ws/install/audio_msgs/lib:/opt/ros/humble/install/lib:${LD_LIBRARY_PATH}"
+ENV AMENT_PREFIX_PATH="/ros_ws/install/audio_msgs:/opt/ros/humble/install"
+
 CMD ["/bin/bash", "-c", \
-    "source /opt/ros/jazzy/setup.bash && \
+    "export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 && \
+     source /opt/ros/humble/install/setup.bash && \
      source /ros_ws/install/setup.bash && \
-     export TTS_PLUGIN=tts && \
-     exec python3 /work/main.py"]
+     python3 /work/main.py"]
