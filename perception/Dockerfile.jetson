@@ -61,15 +61,11 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
     # Create minimal tn text-normalization stub (not in base image)
-    python3 -c "
-import site, os
-p = site.getsitepackages()[0] + '/tn/chinese'
-os.makedirs(p, exist_ok=True)
-with open(p+'/normalizer.py','w') as f: f.write('class Normalizer:\\n    def normalize(self,text):\\n        return text\\n')
-open(p.replace('/chinese','/__init__.py'),'w').close()
-open(p+'/__init__.py','w').close()
-print('tn stub created at', p)
-" && \
+    TNPKG=$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
+    mkdir -p $TNPKG && \
+    printf 'class Normalizer:\n    def normalize(self,text):\n        return text\n' > $TNPKG/normalizer.py && \
+    touch $TNPKG/../__init__.py $TNPKG/__init__.py && \
+    echo "tn stub created at $TNPKG" && \
     ls -lhR /models/vits2-mix/
 
 # ── Application code ───────────────────────────────────────────────
