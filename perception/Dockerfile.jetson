@@ -17,12 +17,13 @@ RUN cd /ros_ws && \
     . /opt/ros/humble/install/setup.bash && \
     colcon build --packages-select audio_msgs --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# ── Python deps (--no-deps for torch safety) ──────────────────
-RUN pip3 install --no-cache-dir \
-    pyyaml requests websockets dashscope && \
-    pip3 install --no-cache-dir --no-deps silero-vad && \
-    pip3 install --no-cache-dir \
-    numpy scipy pypinyin jieba soundfile wetext inflect g2p-en nltk cn2an
+# ── Python deps ────────────────────────────────────────────────
+ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
+RUN pip3 install --no-cache-dir -i ${PIP_MIRROR} \
+    pyyaml requests websockets && \
+    pip3 install --no-cache-dir --no-deps -i ${PIP_MIRROR} silero-vad && \
+    pip3 install --no-cache-dir -i ${PIP_MIRROR} \
+    numpy scipy pypinyin jieba soundfile wetext WeTextProcessing inflect g2p-en nltk cn2an
 
 # ── VITS2 model + source download ──────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
