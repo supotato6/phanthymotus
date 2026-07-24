@@ -8,7 +8,7 @@ FROM ${BASE_IMAGE}
 
 # ── System deps ────────────────────────────────────────────────
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends espeak-ng ffmpeg libfst-dev && \
+    apt-get install -y --no-install-recommends espeak-ng ffmpeg && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ── audio_msgs ──────────────────────────────────────────────────
@@ -23,7 +23,7 @@ RUN pip3 install --no-cache-dir -i ${PIP_MIRROR} \
     pyyaml requests websockets && \
     pip3 install --no-cache-dir --no-deps -i ${PIP_MIRROR} silero-vad && \
     pip3 install --no-cache-dir -i ${PIP_MIRROR} \
-    numpy scipy pypinyin jieba soundfile wetext WeTextProcessing inflect g2p-en nltk cn2an
+    numpy scipy pypinyin jieba soundfile wetext inflect g2p-en nltk cn2an
 
 # ── VITS2 model + source download ──────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
@@ -43,7 +43,12 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     for f in zh_tn_tagger.fst zh_tn_verbalizer.fst en_tn_tagger.fst en_tn_verbalizer.fst; do \
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
-    echo "Model files:" && ls -lh G_B_final_int8.pth config.json
+    echo "Model files:" && ls -lh G_B_final_int8.pth config.json && \
+    TNPKG=$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
+    mkdir -p $TNPKG && \
+    printf 'class Normalizer:\n    def __init__(self,**kw):pass\n    def normalize(self,t):return t\n' > $TNPKG/normalizer.py && \
+    touch $TNPKG/../__init__.py $TNPKG/__init__.py && \
+    echo "tn stub created"
 
 # ── Application code ───────────────────────────────────────────
 WORKDIR /work
