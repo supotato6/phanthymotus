@@ -1,31 +1,63 @@
-# ── VITS2 INT8 TTS ──────────────────────────────────────────────
-# Base: official phanthy-motus perception (jp511-torch, ROS Humble)
-# Overlays VITS2-Mix INT8 model + G2P frontend
-# ────────────────────────────────────────────────────────────────
+# ── Jetson JP6 variant — VITS2 INT8 TTS ────────────────────────────
+# Self-contained JP6+torch from public dustynv images (no private registry).
+#
+# Usage:
+#   docker build -f perception/Dockerfile.jetson --network=host \
+#     -t phanthymotus-perception-tts:latest .
+# ────────────────────────────────────────────────────────────────────
 
-ARG BASE_IMAGE=bj-warehouse.tencentcloudcr.com/phanthy-motus/jetson-base:jp511-torch
-FROM ${BASE_IMAGE}
+ARG PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
+ARG ROS_BASE=docker.m.daocloud.io/dustynv/ros:humble-desktop-l4t-r36.4.0
+ARG PYTORCH_DONOR=docker.m.daocloud.io/dustynv/l4t-pytorch:r36.4.0
 
-# ── System deps ────────────────────────────────────────────────
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends espeak-ng ffmpeg && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# ── Stage: jp6-torch (copy from dustynv) ─────────────────────────
+FROM ${PYTORCH_DONOR} AS pytorch-donor
+FROM ${ROS_BASE} AS jp6-torch-built
+RUN rm -f /etc/apt/sources.list.d/* && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* && \
+    apt-get -o Acquire::AllowInsecureRepositories=true update && \
+    apt-get install -y --no-install-recommends --allow-unauthenticated libopenblas-base && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+COPY --from=pytorch-donor /usr/local/lib/python3.10/dist-packages/ /tmp/pt-donor/
+RUN cd /tmp/pt-donor && \
+    mkdir -p /usr/local/lib/python3.10/dist-packages && \
+    for item in torch torchgen torchvision triton; do \
+        if [ -e "$item" ]; then cp -a "$item" /usr/local/lib/python3.10/dist-packages/; fi; \
+    done && \
+    shopt -s nullglob && \
+    for item in torch-*.dist-info torchvision-*.dist-info triton-*.dist-info; do \
+        cp -a "$item" /usr/local/lib/python3.10/dist-packages/; \
+    done && \
+    rm -rf /tmp/pt-donor
 
-# ── audio_msgs ──────────────────────────────────────────────────
+FROM jp6-torch-built
+ARG PYPI_MIRROR
+
+ENV PIP_INDEX_URL=${PYPI_MIRROR} \
+    PIP_EXTRA_INDEX_URL= \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
+
+# ── System deps ──────────────────────────────────────────────────
+RUN rm -f /etc/apt/sources.list.d/* && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* && \
+    apt-get -o Acquire::AllowInsecureRepositories=true update && \
+    apt-get install -y --no-install-recommends --allow-unauthenticated \
+      ffmpeg espeak-ng && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# ── audio_msgs ────────────────────────────────────────────────────
 COPY deploy/ros-base/audio_msgs/ /ros_ws/src/audio_msgs/
 RUN cd /ros_ws && \
     . /opt/ros/humble/install/setup.bash && \
     colcon build --packages-select audio_msgs --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# ── Python deps ────────────────────────────────────────────────
-ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
-RUN pip3 install --no-cache-dir -i ${PIP_MIRROR} \
+# ── Python deps (TTS only, no VOP/OCR/ASR) ──────────────────────
+RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     pyyaml requests websockets && \
-    pip3 install --no-cache-dir --no-deps -i ${PIP_MIRROR} silero-vad && \
-    pip3 install --no-cache-dir -i ${PIP_MIRROR} \
+    pip3 install --no-cache-dir --no-deps -i ${PYPI_MIRROR} silero-vad && \
+    pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     numpy scipy pypinyin jieba soundfile wetext inflect g2p-en nltk cn2an
 
-# ── VITS2 model + source download ──────────────────────────────
+# ── VITS2 model + source download ────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
 RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
     cd /models/vits2-mix && \
@@ -44,13 +76,13 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
     echo "Model files:" && ls -lh G_B_final_int8.pth config.json && \
-    TNPKG=$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
-    mkdir -p $TNPKG && \
-    python3 -c "open('$TNPKG/normalizer.py','w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n')" && \
-    touch $TNPKG/../__init__.py $TNPKG/__init__.py && \
-    echo "tn stub created"
+    TNPKG=$$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
+    mkdir -p $$TNPKG && \
+    python3 -c "open('$$TNPKG/normalizer.py','w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n')" && \
+    touch $$TNPKG/../__init__.py $$TNPKG/__init__.py && \
+    echo "tn stub created" && \
 
-# ── Application code ───────────────────────────────────────────
+# ── Application code ─────────────────────────────────────────────
 WORKDIR /work
 COPY perception/main.py    /work/main.py
 COPY perception/plugins/   /work/plugins/
@@ -59,8 +91,8 @@ COPY perception/config.yaml /work/config.yaml
 
 EXPOSE 15720 15721
 
-RUN find /ros_ws/install -name "site-packages" -type d > /usr/local/lib/python3.8/dist-packages/ros_ws.pth && \
-    find /opt/ros/humble/install -name "site-packages" -type d >> /usr/local/lib/python3.8/dist-packages/ros_ws.pth
+RUN find /ros_ws/install /opt/ros/humble/install -type d \( -name "site-packages" -o -name "dist-packages" \) \
+      > /usr/local/lib/python3.10/dist-packages/ros_ws.pth
 
 ENV LD_LIBRARY_PATH="/ros_ws/install/audio_msgs/lib:/opt/ros/humble/install/lib:${LD_LIBRARY_PATH}"
 ENV AMENT_PREFIX_PATH="/ros_ws/install/audio_msgs:/opt/ros/humble/install"
