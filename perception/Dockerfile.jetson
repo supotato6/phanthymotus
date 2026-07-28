@@ -34,15 +34,7 @@ RUN cd /ros_ws && \
 RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     pyyaml requests onnxruntime && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    numpy pypinyin jieba wetext inflect g2p-en nltk cn2an && \
-    mkdir -p /models/vits2-mix/nltk_data/taggers /models/vits2-mix/nltk_data/tokenizers /models/vits2-mix/nltk_data/corpora && \
-    curl -fsSL -o /tmp/nltk_1.zip "${MODEL_BASE_URL}/nltk/averaged_perceptron_tagger_eng.zip" && \
-    unzip -qo /tmp/nltk_1.zip -d /models/vits2-mix/nltk_data/taggers/ && rm /tmp/nltk_1.zip && \
-    curl -fsSL -o /tmp/nltk_2.zip "${MODEL_BASE_URL}/nltk/punkt_tab.zip" && \
-    unzip -qo /tmp/nltk_2.zip -d /models/vits2-mix/nltk_data/tokenizers/ && rm /tmp/nltk_2.zip && \
-    curl -fsSL -o /tmp/nltk_3.zip "${MODEL_BASE_URL}/nltk/cmudict.zip" && \
-    unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
-    echo "NLTK data installed"
+    numpy pypinyin jieba wetext inflect g2p-en nltk cn2an
 
 # ── VITS2 model + source download ────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
@@ -64,8 +56,14 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     done && \
     echo "Model files:" && ls -lh G_B_final_int8.pth config.json && \
     python3 -c "import site,os; p=os.path.join(site.getsitepackages()[0],'tn','chinese'); os.makedirs(p,exist_ok=True); open(os.path.join(p,'normalizer.py'),'w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n'); open(os.path.join(os.path.dirname(p),'__init__.py'),'w').close(); open(os.path.join(p,'__init__.py'),'w').close(); print('tn stub ok')" && \
-    python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng', download_dir='/models/vits2-mix/nltk_data')" && \
-    python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/models/vits2-mix/nltk_data')"
+    mkdir -p /models/vits2-mix/nltk_data/taggers /models/vits2-mix/nltk_data/tokenizers /models/vits2-mix/nltk_data/corpora && \
+    curl -fsSL -o /tmp/nltk_1.zip "${MODEL_BASE_URL}/nltk/averaged_perceptron_tagger_eng.zip" && \
+    unzip -qo /tmp/nltk_1.zip -d /models/vits2-mix/nltk_data/taggers/ && rm /tmp/nltk_1.zip && \
+    curl -fsSL -o /tmp/nltk_2.zip "${MODEL_BASE_URL}/nltk/punkt_tab.zip" && \
+    unzip -qo /tmp/nltk_2.zip -d /models/vits2-mix/nltk_data/tokenizers/ && rm /tmp/nltk_2.zip && \
+    curl -fsSL -o /tmp/nltk_3.zip "${MODEL_BASE_URL}/nltk/cmudict.zip" && \
+    unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
+    echo "NLTK data installed"
 
 # ── TRT ONNX files (engines built at container startup) ──────────────
 ARG TRT_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/trt

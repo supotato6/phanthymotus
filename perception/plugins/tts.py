@@ -105,93 +105,6 @@ class TTSAdapter(ABC):
         yield self.synthesize(text)
 
 
-class Vits2Int8Adapter(TTSAdapter):
-    """VITS2-Mix INT8 PyTorch TTS adapter for G_B_final_int8.pth."""
-
-    def __init__(self, model_dir: str, speaker_id: int = 0, speed: float = 1.0):
-        import torch  # lazy import — only needed for pytorch backend
-        _model_path = os.path.join(model_dir, "G_B_final_int8.pth")
-        _config_path = os.path.join(model_dir, "config.json")
-
-        sys.path.insert(0, model_dir)
-        from vits2 import models, commons
-        from vits2.text import symbols
-        from vits2 import utils as vits2_utils
-        from frontend.cleaner import clean_text_mix
-        from frontend import cleaned_text_to_sequence_mix
-        self._clean_text = clean_text_mix
-        self._seq_mix = cleaned_text_to_sequence_mix
-
-        hps = vits2_utils.get_hparams_from_file(_config_path)
-
-        net = models.SynthesizerTrn(
-            len(symbols), hps.data.filter_length // 2 + 1,
-            hps.train.segment_size // hps.data.hop_length,
-            n_speakers=1, mas_noise_scale_initial=0.01,
-            noise_scale_delta=2e-6, **hps.model)
-
-        ckpt = torch.load(_model_path, map_location="cpu")
-        qmodel, qscales = ckpt["model"], ckpt["scales"]
-
-        dq = {}
-        for name, tensor in qmodel.items():
-            if tensor.dtype == torch.float16:
-                dq[name] = tensor.float()
-            elif tensor.dtype == torch.int8:
-                if name in qscales:
-                    s_val = qscales[name]
-                    s = torch.tensor(list(s_val) if isinstance(s_val, (list, tuple)) else float(s_val)).float()
-                    if s.ndim > 0 and tensor.ndim >= 2:
-                        s = s.view(-1, *([1] * (tensor.ndim - 1)))
-                    dq[name] = tensor.float() * s
-                else:
-                    dq[name] = tensor.float()
-            else:
-                dq[name] = tensor
-
-        net.load_state_dict(dq, strict=False)
-        self._net = net.cuda().eval()
-        self._hps = hps
-        self._commons = commons
-        self._spk = torch.tensor([speaker_id], dtype=torch.long, device="cuda")
-        self._speed = speed
-
-        # ── aggressive cleanup: free CPU-side copies ─────────────────
-        del ckpt, qmodel, qscales, dq, net
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        log.info(f"[tts] VITS2 INT8 loaded: {_model_path}, "
-                 f"params={sum(p.numel() for p in self._net.parameters())/1e6:.1f}M")
-
-    def synthesize(self, text: str) -> bytes:
-        return b"".join(self.synthesize_stream(text))
-
-    def synthesize_stream(self, text: str):
-        norm_text, phones, tones, langs, word2ph = self._clean_text(text)
-        phone_ids, tone_ids, lang_ids = self._seq_mix(phones, tones, langs)
-        phone_ids = self._commons.intersperse(phone_ids, 0)
-        tone_ids = self._commons.intersperse(tone_ids, 0)
-        lang_ids = self._commons.intersperse(lang_ids, 0)
-
-        x = torch.tensor([phone_ids], dtype=torch.long, device="cuda")
-        t = torch.tensor([tone_ids], dtype=torch.long, device="cuda")
-        l = torch.tensor([lang_ids], dtype=torch.long, device="cuda")
-        xl = torch.tensor([len(phone_ids)], dtype=torch.long, device="cuda")
-
-        with torch.no_grad():
-            audio = self._net.infer(x, xl, self._spk, t, l,
-                                     noise_scale=0.667, noise_scale_w=0.8,
-                                     length_scale=1.0 / self._speed if self._speed else 1.0)[0][0, 0]
-
-        audio = audio.float().cpu()
-        pcm = struct.pack(f'<{len(audio)}h',
-                          *[int(max(-32768, min(32767, s * 32767))) for s in audio.tolist()])
-        for i in range(0, len(pcm), CHUNK_BYTES):
-            yield pcm[i:i + CHUNK_BYTES]
-
-
 # ── TRT TTS Adapter ────────────────────────────────────────────────────────
 
 class TRTTSAdapter(TTSAdapter):
@@ -322,9 +235,17 @@ class TRTTSAdapter(TTSAdapter):
 
         return tuple(outputs[n] for n in output_names)
 
-    def _ensure_ready(self):
+    def _ensure_ready(self, timeout: float = 300.0):
+        """Block until TRT engines are built, or raise after timeout."""
+        if self._ready:
+            return
+        log.info("[tts] Waiting for TRT engines to finish building...")
+        deadline = time.time() + timeout
+        while not self._ready and time.time() < deadline:
+            time.sleep(2)
         if not self._ready:
-            raise RuntimeError("TRT engines still building, retry in a few seconds")
+            raise RuntimeError(
+                "TRT engines failed to build within %ds — check GPU memory" % int(timeout))
 
     def synthesize(self, text: str) -> bytes:
         self._ensure_ready()
@@ -412,13 +333,10 @@ class TRTTSAdapter(TTSAdapter):
 
 def _build_tts_adapter(cfg: dict) -> TTSAdapter:
     model_dir = cfg.get("model_dir", "/models/vits2-mix")
+    trt_dir = cfg.get("trt_dir", os.path.join(model_dir, "trt"))
     speaker_id = int(cfg.get("speaker_id", 0))
     speed = float(cfg.get("speed", 1.0))
-    backend = cfg.get("backend", "trt")
-    if backend == "trt":
-        trt_dir = cfg.get("trt_dir", os.path.join(model_dir, "trt"))
-        return TRTTSAdapter(model_dir, trt_dir, speaker_id, speed)
-    return Vits2Int8Adapter(model_dir, speaker_id, speed)
+    return TRTTSAdapter(model_dir, trt_dir, speaker_id, speed)
 
 
 # ── ROS2 Node ─────────────────────────────────────────────────────────────────
