@@ -212,8 +212,14 @@ class TRTTSAdapter(TTSAdapter):
         self._clean_text = clean_text_mix
         self._seq_mix = cleaned_text_to_sequence_mix
 
-        import vits2.utils as vits2_utils
-        hps = vits2_utils.get_hparams_from_file(os.path.join(model_dir, "config.json"))
+        # Read config directly — avoid importing vits2 (which requires torch)
+        import json as _json
+        class _HParams:
+            def __init__(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, _HParams(**v) if isinstance(v, dict) else v)
+        with open(os.path.join(model_dir, "config.json"), "r") as _f:
+            hps = _HParams(**_json.load(_f))
 
         # ── ONNX Runtime encoder ──
         import onnxruntime as ort

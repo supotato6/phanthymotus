@@ -35,8 +35,14 @@ RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     pyyaml requests onnxruntime && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     numpy pypinyin jieba wetext inflect g2p-en nltk cn2an && \
-    python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('cmudict'); nltk.download('punkt_tab')" && \
-    rm -rf /root/nltk_data/zip /root/nltk_data/*.zip
+    mkdir -p /models/vits2-mix/nltk_data/taggers /models/vits2-mix/nltk_data/tokenizers /models/vits2-mix/nltk_data/corpora && \
+    curl -fsSL -o /tmp/nltk_1.zip "${MODEL_BASE_URL}/nltk/averaged_perceptron_tagger_eng.zip" && \
+    unzip -qo /tmp/nltk_1.zip -d /models/vits2-mix/nltk_data/taggers/ && rm /tmp/nltk_1.zip && \
+    curl -fsSL -o /tmp/nltk_2.zip "${MODEL_BASE_URL}/nltk/punkt_tab.zip" && \
+    unzip -qo /tmp/nltk_2.zip -d /models/vits2-mix/nltk_data/tokenizers/ && rm /tmp/nltk_2.zip && \
+    curl -fsSL -o /tmp/nltk_3.zip "${MODEL_BASE_URL}/nltk/cmudict.zip" && \
+    unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
+    echo "NLTK data installed"
 
 # ── VITS2 model + source download ────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
