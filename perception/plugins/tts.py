@@ -224,10 +224,21 @@ class TRTTSAdapter(TTSAdapter):
         # ── TRT engines (flow + decoder) ──
         import tensorrt as trt
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-        with open(os.path.join(trt_dir, "flow.trt"), "rb") as f:
+        flow_path = os.path.join(trt_dir, "flow.trt")
+        dec_path = os.path.join(trt_dir, "decoder.trt")
+        if not os.path.exists(flow_path) or not os.path.exists(dec_path):
+            raise FileNotFoundError(
+                f"TRT engines missing: {flow_path} (exists={os.path.exists(flow_path)}), "
+                f"{dec_path} (exists={os.path.exists(dec_path)}). "
+                f"Ensure Dockerfile builds TRT engines with trtexec.")
+        with open(flow_path, "rb") as f:
             self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-        with open(os.path.join(trt_dir, "decoder.trt"), "rb") as f:
+        with open(dec_path, "rb") as f:
             self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
+        if self._flow_eng is None:
+            raise RuntimeError(f"Failed to deserialize {flow_path} — may be built on incompatible Jetson/TensorRT version")
+        if self._dec_eng is None:
+            raise RuntimeError(f"Failed to deserialize {dec_path} — may be built on incompatible Jetson/TensorRT version")
 
         # ── CUDA allocator ──
         import ctypes
