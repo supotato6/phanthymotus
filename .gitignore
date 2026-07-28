@@ -1,0 +1,5 @@
+
+# TRT/ONNX large binary files (generated, not committed)
+tools/trt/*.onnx
+tools/trt/*.trt
+*.sarif

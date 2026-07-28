@@ -416,8 +416,9 @@ def main():
 
     threading.Thread(target=_spin, daemon=True, name="perception_spin").start()
 
-    # Start WebSocket ASR server in a separate thread
-    threading.Thread(target=_start_ws_thread, args=(ws_port,), daemon=True, name="ws_asr").start()
+    # Start WebSocket ASR server only when ASR plugin is enabled
+    if cfg.get("plugins", {}).get("asr", {}).get("enabled", False):
+        threading.Thread(target=_start_ws_thread, args=(ws_port,), daemon=True, name="ws_asr").start()
 
     _start_registration(mcp_port, "Perception Stack", "perception")
 

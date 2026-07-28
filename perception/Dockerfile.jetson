@@ -52,10 +52,10 @@ RUN cd /ros_ws && \
 
 # ── Python deps (TTS only, no VOP/OCR/ASR) ──────────────────────
 RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    pyyaml requests websockets && \
-    pip3 install --no-cache-dir --no-deps -i ${PYPI_MIRROR} silero-vad && \
+    pyyaml requests && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    numpy scipy pypinyin jieba soundfile wetext inflect g2p-en nltk cn2an
+    numpy scipy pypinyin jieba wetext inflect g2p-en nltk cn2an && \
+    python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('cmudict')"
 
 # ── VITS2 model + source download ────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
@@ -76,11 +76,18 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
     echo "Model files:" && ls -lh G_B_final_int8.pth config.json && \
-    TNPKG=$$(python3 -c "import site; print(site.getsitepackages()[0])")/tn/chinese && \
-    mkdir -p $$TNPKG && \
-    python3 -c "open('$$TNPKG/normalizer.py','w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n')" && \
-    touch $$TNPKG/../__init__.py $$TNPKG/__init__.py && \
-    echo "tn stub created" && \
+    python3 -c "import site,os; p=os.path.join(site.getsitepackages()[0],'tn','chinese'); os.makedirs(p,exist_ok=True); open(os.path.join(p,'normalizer.py'),'w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n'); open(os.path.join(os.path.dirname(p),'__init__.py'),'w').close(); open(os.path.join(p,'__init__.py'),'w').close(); print('tn stub ok')" && \
+    python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng', download_dir='/models/vits2-mix/nltk_data')" && \
+    python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/models/vits2-mix/nltk_data')"
+
+# ── TRT engines (pre-built on Jetson, hosted on JuiceFS) ─────────────
+ARG TRT_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/trt
+RUN mkdir -p /models/vits2-mix/trt && \
+    cd /models/vits2-mix/trt && \
+    curl -fsSL -o encoder_duration.onnx "${TRT_BASE_URL}/encoder_duration.onnx" && \
+    curl -fsSL -o flow.trt              "${TRT_BASE_URL}/flow.trt" && \
+    curl -fsSL -o decoder.trt           "${TRT_BASE_URL}/decoder.trt" && \
+    echo "TRT engines:" && ls -lh
 
 # ── Application code ─────────────────────────────────────────────
 WORKDIR /work

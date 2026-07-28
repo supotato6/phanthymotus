@@ -8,7 +8,7 @@ Model: G_B_final_int8.pth (35.4MB, trained on 柒小白 + mixed CN-EN data).
 
 from __future__ import annotations
 
-import json, logging, os, queue, struct, sys, threading, time, types
+import ctypes, gc, json, logging, os, queue, struct, sys, threading, time, types
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -156,8 +156,14 @@ class Vits2Int8Adapter(TTSAdapter):
         self._spk = torch.tensor([speaker_id], dtype=torch.long, device="cuda")
         self._speed = speed
 
+        # ── aggressive cleanup: free CPU-side copies ─────────────────
+        del ckpt, qmodel, qscales, dq, net
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         log.info(f"[tts] VITS2 INT8 loaded: {_model_path}, "
-                 f"params={sum(p.numel() for p in net.parameters())/1e6:.1f}M")
+                 f"params={sum(p.numel() for p in self._net.parameters())/1e6:.1f}M")
 
     def synthesize(self, text: str) -> bytes:
         return b"".join(self.synthesize_stream(text))
@@ -186,10 +192,182 @@ class Vits2Int8Adapter(TTSAdapter):
             yield pcm[i:i + CHUNK_BYTES]
 
 
+# ── TRT TTS Adapter ────────────────────────────────────────────────────────
+
+class TRTTSAdapter(TTSAdapter):
+    """VITS2-Mix TensorRT TTS adapter — no PyTorch dependency.
+
+    Uses ONNX Runtime for encoder, TRT engines for flow + decoder,
+    and NumPy for iSTFT.  Memory ~280MB vs ~850MB for PyTorch.
+    """
+
+    def __init__(self, model_dir: str, trt_dir: str,
+                 speaker_id: int = 0, speed: float = 1.0):
+        self._speed = speed
+
+        # ── Frontend (same as PyTorch adapter) ──
+        sys.path.insert(0, model_dir)
+        from frontend.cleaner import clean_text_mix
+        from frontend import cleaned_text_to_sequence_mix
+        self._clean_text = clean_text_mix
+        self._seq_mix = cleaned_text_to_sequence_mix
+
+        import vits2.utils as vits2_utils
+        hps = vits2_utils.get_hparams_from_file(os.path.join(model_dir, "config.json"))
+
+        # ── ONNX Runtime encoder ──
+        import onnxruntime as ort
+        encoder_path = os.path.join(trt_dir, "encoder_duration.onnx")
+        self._encoder = ort.InferenceSession(encoder_path,
+                                              providers=["CPUExecutionProvider"])
+
+        # ── TRT engines (flow + decoder) ──
+        import tensorrt as trt
+        TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+        with open(os.path.join(trt_dir, "flow.trt"), "rb") as f:
+            self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
+        with open(os.path.join(trt_dir, "decoder.trt"), "rb") as f:
+            self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
+
+        # ── CUDA allocator ──
+        import ctypes
+        self._cuda = ctypes.CDLL("libcudart.so")
+        self._cuda.cudaMalloc.restype = int
+        self._cuda.cudaMalloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        self._cuda.cudaFree.restype = int
+        self._cuda.cudaFree.argtypes = [ctypes.c_void_p]
+        self._cuda.cudaMemcpy.restype = int
+        self._cuda.cudaMemcpy.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                           ctypes.c_size_t, ctypes.c_int]
+
+        log.info(f"[tts] TRT adapter loaded: encoder={encoder_path}")
+
+    def _gpu_alloc(self, size):
+        ptr = ctypes.c_void_p(0)
+        self._cuda.cudaMalloc(ctypes.byref(ptr), size)
+        return ptr
+
+    def _trt_run(self, engine, inputs, output_names):
+        import tensorrt as trt
+        ctx = engine.create_execution_context()
+        gpu_ptrs = {}
+        outputs = {}
+
+        for i in range(engine.num_io_tensors):
+            name = engine.get_tensor_name(i)
+            if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                data = inputs[name].astype(np.float32)
+                ctx.set_input_shape(name, data.shape)
+                ptr = self._gpu_alloc(data.nbytes)
+                self._cuda.cudaMemcpy(ptr, data.ctypes.data, data.nbytes, 1)  # H2D
+                gpu_ptrs[name] = ptr
+            else:
+                shape = tuple(ctx.get_tensor_shape(name))
+                outputs[name] = np.empty(shape, dtype=np.float32)
+                ptr = self._gpu_alloc(outputs[name].nbytes)
+                gpu_ptrs[name] = ptr
+
+        bindings = [gpu_ptrs[engine.get_tensor_name(i)].value
+                     for i in range(engine.num_io_tensors)]
+        ctx.execute_v2(bindings)
+
+        for name, arr in outputs.items():
+            self._cuda.cudaMemcpy(arr.ctypes.data, gpu_ptrs[name], arr.nbytes, 2)  # D2H
+        for p in gpu_ptrs.values():
+            self._cuda.cudaFree(p)
+
+        return tuple(outputs[n] for n in output_names)
+
+    def synthesize(self, text: str) -> bytes:
+        return b"".join(self.synthesize_stream(text))
+
+    def synthesize_stream(self, text: str):
+        # ── 1. Text → phoneme IDs ──
+        norm_text, phones, tones, langs, word2ph = self._clean_text(text)
+        phone_ids, tone_ids, lang_ids = self._seq_mix(phones, tones, langs)
+        phone_ids = [0] + [p for pid in phone_ids for p in (pid, 0)]
+        tone_ids = [0] + [t for tid in tone_ids for t in (tid, 0)]
+        lang_ids = [0] + [l for lid in lang_ids for l in (lid, 0)]
+        T = len(phone_ids)
+
+        ph = np.array([phone_ids], dtype=np.int32)
+        to = np.array([tone_ids], dtype=np.int32)
+        la = np.array([lang_ids], dtype=np.int32)
+        xl = np.array([T], dtype=np.int32)
+
+        # ── 2. Encoder (ORT) ──
+        m_p, logs_p, logw, x_mask = self._encoder.run(None,
+            {"ph": ph, "to": to, "la": la, "xl": xl})
+
+        # ── 3. Duration → expanded frames ──
+        w = np.exp(logw[0, 0, :T]) * x_mask[0, 0, :T]
+        w_ceil = np.ceil(w).astype(np.int32)
+        Ty = int(w_ceil.sum())
+        y_mask = np.ones((1, 1, Ty), dtype=np.float32)
+
+        dur = np.maximum(w_ceil, 1).astype(np.int32)
+        cumsum = np.concatenate([[0], np.cumsum(dur)[:-1]])
+        m_p_exp = np.zeros((1, 256, Ty), dtype=np.float32)
+        logs_p_exp = np.zeros((1, 256, Ty), dtype=np.float32)
+        for i, (d, pos) in enumerate(zip(dur, cumsum)):
+            if d > 0 and pos < Ty:
+                end = min(pos + d, Ty)
+                m_p_exp[0, :, pos:end] = m_p[0, :, i:i + 1]
+                logs_p_exp[0, :, pos:end] = logs_p[0, :, i:i + 1]
+
+        noise_scale = 0.667
+        z_p = (m_p_exp +
+               np.random.randn(1, 256, Ty).astype(np.float32) *
+               np.exp(logs_p_exp) * noise_scale)
+
+        # ── 4. Flow (TRT GPU) ──
+        z, = self._trt_run(self._flow_eng,
+                            {"z_p": z_p, "y_mask": y_mask}, ["z"])
+
+        # ── 5. Decoder (TRT GPU) → spec + phase ──
+        spec, phase = self._trt_run(self._dec_eng, {"z": z},
+                                     ["spec", "phase"])
+
+        # ── 6. iSTFT (NumPy) ──
+        n_fft, hop = 16, 4
+        tf = np.fft.irfft(spec * np.exp(1j * phase), n=n_fft, axis=1)
+        window = np.hanning(n_fft).astype(np.float32).reshape(1, n_fft, 1)
+        windowed = tf * window
+        _, _, T_frames = tf.shape
+        out_len = (T_frames - 1) * hop + n_fft
+        audio = np.zeros((1, out_len), dtype=np.float32)
+        for i in range(T_frames):
+            audio[0, i * hop:i * hop + n_fft] += windowed[0, :, i]
+        audio = audio[:, n_fft // 2:out_len - n_fft // 2]
+
+        # Apply speed (length_scale)
+        if self._speed and self._speed != 1.0:
+            target_len = int(audio.shape[1] / self._speed)
+            indices = np.linspace(0, audio.shape[1] - 1, target_len)
+            resampled = np.zeros((1, target_len), dtype=np.float32)
+            for i, idx in enumerate(indices):
+                lo, hi = int(np.floor(idx)), min(int(np.ceil(idx)), audio.shape[1] - 1)
+                frac = idx - lo
+                resampled[0, i] = audio[0, lo] * (1 - frac) + audio[0, hi] * frac
+            audio = resampled
+
+        # ── 7. Convert to PCM bytes ──
+        audio_f32 = audio[0]
+        pcm = struct.pack(f'<{len(audio_f32)}h',
+                          *[int(max(-32768, min(32767, s * 32767)))
+                            for s in audio_f32.tolist()])
+        for i in range(0, len(pcm), CHUNK_BYTES):
+            yield pcm[i:i + CHUNK_BYTES]
+
+
 def _build_tts_adapter(cfg: dict) -> TTSAdapter:
     model_dir = cfg.get("model_dir", "/models/vits2-mix")
     speaker_id = int(cfg.get("speaker_id", 0))
     speed = float(cfg.get("speed", 1.0))
+    backend = cfg.get("backend", "trt")
+    if backend == "trt":
+        trt_dir = cfg.get("trt_dir", os.path.join(model_dir, "trt"))
+        return TRTTSAdapter(model_dir, trt_dir, speaker_id, speed)
     return Vits2Int8Adapter(model_dir, speaker_id, speed)
 
 
@@ -292,10 +470,14 @@ class TTSPlugin:
         self._cfg = plugin_cfg
         self._loading = False
         self._load_error = None
+        self._adapter = None
         try: self._adapter = _build_tts_adapter(plugin_cfg)
         except Exception as e:
             log.error(f"[tts] model load failed: {e}", exc_info=True)
             self._adapter = None; self._load_error = str(e)
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         self._nodes = {}
         self._executor = executor
 
@@ -350,11 +532,20 @@ class TTSPlugin:
         if action == "config":
             if 'speaker_id' in args: self._cfg['speaker_id'] = int(args['speaker_id'])
             if 'speed' in args: self._cfg['speed'] = float(args['speed'])
-            self._adapter = _build_tts_adapter(self._cfg)
+            # ── stop all nodes & release old model before rebuild ────
             for k in list(self._nodes.keys()):
                 self._nodes[k].stop()
                 self._executor.remove_node(self._nodes[k])
                 del self._nodes[k]
+            if self._adapter is not None:
+                if hasattr(self._adapter, '_net'):
+                    del self._adapter._net
+                del self._adapter
+                self._adapter = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self._adapter = _build_tts_adapter(self._cfg)
             return {"status": "configured"}
 
         return None
