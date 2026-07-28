@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import numpy as np
-import torch
 
 import rclpy
 from rclpy.node import Node
@@ -110,6 +109,7 @@ class Vits2Int8Adapter(TTSAdapter):
     """VITS2-Mix INT8 PyTorch TTS adapter for G_B_final_int8.pth."""
 
     def __init__(self, model_dir: str, speaker_id: int = 0, speed: float = 1.0):
+        import torch  # lazy import — only needed for pytorch backend
         _model_path = os.path.join(model_dir, "G_B_final_int8.pth")
         _config_path = os.path.join(model_dir, "config.json")
 
@@ -231,16 +231,20 @@ class TRTTSAdapter(TTSAdapter):
         dec_onnx = os.path.join(trt_dir, "decoder_spec.onnx")
 
         if not os.path.exists(flow_path) or not os.path.exists(dec_path):
-            log.info("[tts] Building TRT engines (first startup, ~30s)...")
+            log.info("[tts] Building TRT engines (first startup, ~60s)...")
             trtexec = "/usr/src/tensorrt/bin/trtexec"
-            subprocess.run([trtexec, "--onnx=" + flow_onnx, "--saveEngine=" + flow_path, "--fp16",
+            trt_opts = ["--fp16", "--workspace=128",
                 "--minShapes=z_p:1x256x1,y_mask:1x1x1",
                 "--optShapes=z_p:1x256x100,y_mask:1x1x100",
-                "--maxShapes=z_p:1x256x2000,y_mask:1x1x2000"], check=True)
-            subprocess.run([trtexec, "--onnx=" + dec_onnx, "--saveEngine=" + dec_path, "--fp16",
+                "--maxShapes=z_p:1x256x2000,y_mask:1x1x2000"]
+            subprocess.run([trtexec, "--onnx=" + flow_onnx, "--saveEngine=" + flow_path] + trt_opts,
+                           check=True, timeout=300)
+            trt_opts2 = ["--fp16", "--workspace=128",
                 "--minShapes=z:1x256x1",
                 "--optShapes=z:1x256x100",
-                "--maxShapes=z:1x256x1500"], check=True)
+                "--maxShapes=z:1x256x1500"]
+            subprocess.run([trtexec, "--onnx=" + dec_onnx, "--saveEngine=" + dec_path] + trt_opts2,
+                           check=True, timeout=300)
             log.info("[tts] TRT engines built successfully")
 
         with open(flow_path, "rb") as f:

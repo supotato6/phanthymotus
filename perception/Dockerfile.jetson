@@ -1,5 +1,5 @@
-# ── Jetson JP6 variant — VITS2 INT8 TTS ────────────────────────────
-# Self-contained JP6+torch from public dustynv images (no private registry).
+# ── Jetson JP6 variant — VITS2 TRT TTS (no PyTorch) ────────────────
+# TRT-only: does NOT need PyTorch, saving ~200MB image + 500MB runtime.
 #
 # Usage:
 #   docker build -f perception/Dockerfile.jetson --network=host \
@@ -8,28 +8,8 @@
 
 ARG PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
 ARG ROS_BASE=docker.m.daocloud.io/dustynv/ros:humble-desktop-l4t-r36.4.0
-ARG PYTORCH_DONOR=docker.m.daocloud.io/dustynv/l4t-pytorch:r36.4.0
 
-# ── Stage: jp6-torch (copy from dustynv) ─────────────────────────
-FROM ${PYTORCH_DONOR} AS pytorch-donor
-FROM ${ROS_BASE} AS jp6-torch-built
-RUN rm -f /etc/apt/sources.list.d/* && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* && \
-    apt-get -o Acquire::AllowInsecureRepositories=true update && \
-    apt-get install -y --no-install-recommends --allow-unauthenticated libopenblas-base && \
-    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
-COPY --from=pytorch-donor /usr/local/lib/python3.10/dist-packages/ /tmp/pt-donor/
-RUN cd /tmp/pt-donor && \
-    mkdir -p /usr/local/lib/python3.10/dist-packages && \
-    for item in torch torchgen torchvision triton; do \
-        if [ -e "$item" ]; then cp -a "$item" /usr/local/lib/python3.10/dist-packages/; fi; \
-    done && \
-    shopt -s nullglob && \
-    for item in torch-*.dist-info torchvision-*.dist-info triton-*.dist-info; do \
-        cp -a "$item" /usr/local/lib/python3.10/dist-packages/; \
-    done && \
-    rm -rf /tmp/pt-donor
-
-FROM jp6-torch-built
+FROM ${ROS_BASE}
 ARG PYPI_MIRROR
 
 ENV PIP_INDEX_URL=${PYPI_MIRROR} \
@@ -50,12 +30,13 @@ RUN cd /ros_ws && \
     . /opt/ros/humble/install/setup.bash && \
     colcon build --packages-select audio_msgs --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# ── Python deps (TTS only, no VOP/OCR/ASR) ──────────────────────
+# ── Python deps (TTS only, no torch/VOP/OCR/ASR) ────────────────────
 RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     pyyaml requests onnxruntime && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    numpy scipy pypinyin jieba wetext inflect g2p-en nltk cn2an && \
-    python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('cmudict')"
+    numpy pypinyin jieba wetext inflect g2p-en nltk cn2an && \
+    python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('cmudict'); nltk.download('punkt_tab')" && \
+    rm -rf /root/nltk_data/zip /root/nltk_data/*.zip
 
 # ── VITS2 model + source download ────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
