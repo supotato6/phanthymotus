@@ -221,24 +221,34 @@ class TRTTSAdapter(TTSAdapter):
         self._encoder = ort.InferenceSession(encoder_path,
                                               providers=["CPUExecutionProvider"])
 
-        # ── TRT engines (flow + decoder) ──
+        # ── TRT engines (auto-build at first startup, GPU available at runtime) ─
         import tensorrt as trt
+        import subprocess
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         flow_path = os.path.join(trt_dir, "flow.trt")
         dec_path = os.path.join(trt_dir, "decoder.trt")
+        flow_onnx = os.path.join(trt_dir, "flow.onnx")
+        dec_onnx = os.path.join(trt_dir, "decoder_spec.onnx")
+
         if not os.path.exists(flow_path) or not os.path.exists(dec_path):
-            raise FileNotFoundError(
-                f"TRT engines missing: {flow_path} (exists={os.path.exists(flow_path)}), "
-                f"{dec_path} (exists={os.path.exists(dec_path)}). "
-                f"Ensure Dockerfile builds TRT engines with trtexec.")
+            log.info("[tts] Building TRT engines (first startup, ~30s)...")
+            trtexec = "/usr/src/tensorrt/bin/trtexec"
+            subprocess.run([trtexec, "--onnx=" + flow_onnx, "--saveEngine=" + flow_path, "--fp16",
+                "--minShapes=z_p:1x256x1,y_mask:1x1x1",
+                "--optShapes=z_p:1x256x100,y_mask:1x1x100",
+                "--maxShapes=z_p:1x256x2000,y_mask:1x1x2000"], check=True)
+            subprocess.run([trtexec, "--onnx=" + dec_onnx, "--saveEngine=" + dec_path, "--fp16",
+                "--minShapes=z:1x256x1",
+                "--optShapes=z:1x256x100",
+                "--maxShapes=z:1x256x1500"], check=True)
+            log.info("[tts] TRT engines built successfully")
+
         with open(flow_path, "rb") as f:
             self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
         with open(dec_path, "rb") as f:
             self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-        if self._flow_eng is None:
-            raise RuntimeError(f"Failed to deserialize {flow_path} — may be built on incompatible Jetson/TensorRT version")
-        if self._dec_eng is None:
-            raise RuntimeError(f"Failed to deserialize {dec_path} — may be built on incompatible Jetson/TensorRT version")
+        if self._flow_eng is None or self._dec_eng is None:
+            raise RuntimeError(f"Failed to load TRT engines from {trt_dir}")
 
         # ── CUDA allocator ──
         import ctypes
