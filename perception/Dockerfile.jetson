@@ -65,14 +65,14 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
     echo "NLTK data installed"
 
-# ── TRT ONNX files (engines built at container startup) ──────────────
+# ── TRT engines (pre-built with eval base image, TRT 10.4 compatible) ─
 ARG TRT_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/trt
 RUN mkdir -p /models/vits2-mix/trt && \
     cd /models/vits2-mix/trt && \
     curl -fsSL -o encoder_duration.onnx "${TRT_BASE_URL}/encoder_duration.onnx" && \
-    curl -fsSL -o flow.onnx              "${TRT_BASE_URL}/flow.onnx" && \
-    curl -fsSL -o decoder_spec.onnx      "${TRT_BASE_URL}/decoder_spec.onnx" && \
-    echo "ONNX files:" && ls -lh
+    curl -fsSL -o flow.trt              "${TRT_BASE_URL}/flow.trt" && \
+    curl -fsSL -o decoder.trt           "${TRT_BASE_URL}/decoder.trt" && \
+    echo "TRT engines:" && ls -lh
 
 # ── Application code ─────────────────────────────────────────────
 WORKDIR /work

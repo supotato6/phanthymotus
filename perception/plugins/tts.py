@@ -149,42 +149,12 @@ class TRTTSAdapter(TTSAdapter):
         flow_onnx = os.path.join(trt_dir, "flow.onnx")
         dec_onnx = os.path.join(trt_dir, "decoder_spec.onnx")
 
-        if not os.path.exists(flow_path) or not os.path.exists(dec_path):
-            log.info("[tts] TRT engines not found, starting async build...")
-            self._ready = False
-            import threading
-            def _build_and_load():
-                try:
-                    trtexec = "/usr/src/tensorrt/bin/trtexec"
-                    subprocess.run([trtexec, "--onnx=" + flow_onnx, "--saveEngine=" + flow_path,
-                        "--fp16",
-                        "--minShapes=z_p:1x256x1,y_mask:1x1x1",
-                        "--optShapes=z_p:1x256x100,y_mask:1x1x100",
-                        "--maxShapes=z_p:1x256x2000,y_mask:1x1x2000"],
-                        check=True, timeout=300)
-                    subprocess.run([trtexec, "--onnx=" + dec_onnx, "--saveEngine=" + dec_path,
-                        "--fp16",
-                        "--minShapes=z:1x256x1",
-                        "--optShapes=z:1x256x100",
-                        "--maxShapes=z:1x256x1500"],
-                        check=True, timeout=300)
-                    with open(flow_path, "rb") as f:
-                        self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-                    with open(dec_path, "rb") as f:
-                        self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-                    self._ready = True
-                    log.info("[tts] TRT engines built and loaded, TTS ready")
-                except Exception as e:
-                    log.error("[tts] TRT build/load failed: %s", e)
-            threading.Thread(target=_build_and_load, daemon=True, name="trt_build").start()
-        else:
-            with open(flow_path, "rb") as f:
-                self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-            with open(dec_path, "rb") as f:
-                self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-            if self._flow_eng is None or self._dec_eng is None:
-                raise RuntimeError(f"Failed to load TRT engines from {trt_dir}")
-            self._ready = True
+        with open(flow_path, "rb") as f:
+            self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
+        with open(dec_path, "rb") as f:
+            self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
+        if self._flow_eng is None or self._dec_eng is None:
+            raise RuntimeError(f"Failed to load TRT engines from {trt_dir}")
 
         # ── CUDA allocator ──
         import ctypes
@@ -235,24 +205,11 @@ class TRTTSAdapter(TTSAdapter):
 
         return tuple(outputs[n] for n in output_names)
 
-    def _ensure_ready(self, timeout: float = 300.0):
-        """Block until TRT engines are built, or raise after timeout."""
-        if self._ready:
-            return
-        log.info("[tts] Waiting for TRT engines to finish building...")
-        deadline = time.time() + timeout
-        while not self._ready and time.time() < deadline:
-            time.sleep(2)
-        if not self._ready:
-            raise RuntimeError(
-                "TRT engines failed to build within %ds — check GPU memory" % int(timeout))
 
     def synthesize(self, text: str) -> bytes:
-        self._ensure_ready()
         return b"".join(self.synthesize_stream(text))
 
     def synthesize_stream(self, text: str):
-        self._ensure_ready()
         # ── 1. Text → phoneme IDs ──
         norm_text, phones, tones, langs, word2ph = self._clean_text(text)
         phone_ids, tone_ids, lang_ids = self._seq_mix(phones, tones, langs)
