@@ -105,6 +105,23 @@ class TTSAdapter(ABC):
         yield self.synthesize(text)
 
 
+# ── ORT Session Cache ────────────────────────────────────────────────────────
+_ORT_SESSIONS = {}
+_TRT_ENGINES = {}
+
+def _get_ort_session(path):
+    if path not in _ORT_SESSIONS:
+        import onnxruntime as ort
+        _ORT_SESSIONS[path] = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    return _ORT_SESSIONS[path]
+
+def _get_trt_engine(path):
+    if path not in _TRT_ENGINES:
+        import tensorrt as trt
+        with open(path, "rb") as f:
+            _TRT_ENGINES[path] = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(f.read())
+    return _TRT_ENGINES[path]
+
 # ── TRT TTS Adapter ────────────────────────────────────────────────────────
 
 class TRTTSAdapter(TTSAdapter):
@@ -137,25 +154,15 @@ class TRTTSAdapter(TTSAdapter):
         self._n_fft = getattr(hps.model, 'gen_istft_n_fft', 16)
         self._hop = getattr(hps.model, 'gen_istft_hop_size', 4)
 
-        # ── ONNX Runtime encoder ──
-        import onnxruntime as ort
+        # ── ONNX Runtime encoder (shared across instances) ──
         encoder_path = os.path.join(trt_dir, "encoder_duration.onnx")
-        self._encoder = ort.InferenceSession(encoder_path,
-                                              providers=["CPUExecutionProvider"])
+        self._encoder = _get_ort_session(encoder_path)
 
-        # ── TRT engines (auto-build at first startup, GPU available at runtime) ─
-        import tensorrt as trt
-        import subprocess
-        TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+        # ── TRT engines (shared across instances via module cache) ──
         flow_path = os.path.join(trt_dir, "flow.trt")
         dec_path = os.path.join(trt_dir, "decoder.trt")
-        flow_onnx = os.path.join(self._trt_dir, "flow.onnx")
-        dec_onnx = os.path.join(self._trt_dir, "decoder_spec.onnx")
-
-        with open(flow_path, "rb") as f:
-            self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
-        with open(dec_path, "rb") as f:
-            self._dec_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
+        self._flow_eng = _get_trt_engine(flow_path)
+        self._dec_eng = _get_trt_engine(dec_path)
         if self._flow_eng is None or self._dec_eng is None:
             raise RuntimeError(f"Failed to load TRT engines from {trt_dir}")
 
@@ -330,6 +337,9 @@ class TRTTSAdapter(TTSAdapter):
 
         # ── 7. Convert to PCM bytes (vectorized) ──
         audio_f32 = audio[0]
+        peak = max(abs(audio_f32.max()), abs(audio_f32.min()), 1.0)
+        if peak > 1.5:
+            audio_f32 = audio_f32 * (1.0 / peak)
         audio_i16 = np.clip(audio_f32 * 32767, -32768, 32767).astype(np.int16)
         pcm = audio_i16.tobytes()
         t6 = time.perf_counter()
