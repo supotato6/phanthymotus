@@ -304,7 +304,9 @@ class TRTTSAdapter(TTSAdapter):
         t5 = time.perf_counter()
 
         # ── 6. iSTFT (NumPy, vectorized) ──
-        n_fft, hop = 16, 4
+        # Read n_fft from config (default 64 for G_opt_v8, 16 for original)
+        n_fft = getattr(hps.model, 'gen_istft_n_fft', 64)
+        hop = getattr(hps.model, 'gen_istft_hop_size', 16)
         tf = np.fft.irfft(spec * np.exp(1j * phase), n=n_fft, axis=1)
         window = np.hanning(n_fft).astype(np.float32).reshape(1, n_fft, 1)
         windowed = tf * window  # [1, n_fft, T_frames]
@@ -430,9 +432,6 @@ class _TTSNode(Node):
                                     m.data = list(pf); self._pub.publish(m); frames += 1
                                 prebuf = []
                             continue
-                        target = played + frames * FRAME
-                        now = time.monotonic()
-                        if now < target: time.sleep(target - now)
                         m = AudioChunk(); m.format = "audio/pcm-16k"
                         m.data = list(frame); self._pub.publish(m); frames += 1
                 if prebuf:
