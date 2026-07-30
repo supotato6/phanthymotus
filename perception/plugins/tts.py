@@ -117,6 +117,7 @@ class TRTTSAdapter(TTSAdapter):
     def __init__(self, model_dir: str, trt_dir: str,
                  speaker_id: int = 0, speed: float = 1.0):
         self._speed = speed
+        self._trt_dir = trt_dir
 
         # ── Frontend (same as PyTorch adapter) ──
         sys.path.insert(0, model_dir)
@@ -146,8 +147,8 @@ class TRTTSAdapter(TTSAdapter):
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         flow_path = os.path.join(trt_dir, "flow.trt")
         dec_path = os.path.join(trt_dir, "decoder.trt")
-        flow_onnx = os.path.join(trt_dir, "flow.onnx")
-        dec_onnx = os.path.join(trt_dir, "decoder_spec.onnx")
+        flow_onnx = os.path.join(self._trt_dir, "flow.onnx")
+        dec_onnx = os.path.join(self._trt_dir, "decoder_spec.onnx")
 
         with open(flow_path, "rb") as f:
             self._flow_eng = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(f.read())
@@ -206,10 +207,31 @@ class TRTTSAdapter(TTSAdapter):
         return tuple(outputs[n] for n in output_names)
 
 
+    MAX_TRT_FRAMES = 3000  # split text if estimated frames exceed this (safe under 4000)
+
+    @staticmethod
+    def _split_sentences(text: str) -> list:
+        """Split text at sentence boundaries for chunked synthesis."""
+        import re
+        parts = re.split(r'(?<=[。！？\n])(?![。！？\n])|(?<=[.!?\n])(?![.!?\n])', text)
+        chunks, buf = [], ""
+        for part in parts:
+            if len(buf) + len(part) < 10:
+                buf += part
+            else:
+                if buf.strip():
+                    chunks.append(buf.strip())
+                buf = part
+        if buf.strip():
+            chunks.append(buf.strip())
+        return chunks if len(chunks) > 1 else [text]
+
     def synthesize(self, text: str) -> bytes:
         return b"".join(self.synthesize_stream(text))
 
-    def synthesize_stream(self, text: str):
+    def _synthesize_chunk(self, text: str, noise_scale: float = 0.667):
+        """Synthesize a single text chunk, returning float32 numpy array."""
+        t0 = time.perf_counter()
         # ── 1. Text → phoneme IDs ──
         norm_text, phones, tones, langs, word2ph = self._clean_text(text)
         phone_ids, tone_ids, lang_ids = self._seq_mix(phones, tones, langs)
@@ -217,6 +239,7 @@ class TRTTSAdapter(TTSAdapter):
         tone_ids = [0] + [t for tid in tone_ids for t in (tid, 0)]
         lang_ids = [0] + [l for lid in lang_ids for l in (lid, 0)]
         T = len(phone_ids)
+        t1 = time.perf_counter()
 
         ph = np.array([phone_ids], dtype=np.int32)
         to = np.array([tone_ids], dtype=np.int32)
@@ -226,6 +249,7 @@ class TRTTSAdapter(TTSAdapter):
         # ── 2. Encoder (ORT) ──
         m_p, logs_p, logw, x_mask = self._encoder.run(None,
             {"ph": ph, "to": to, "la": la, "xl": xl})
+        t2 = time.perf_counter()
 
         # ── 3. Duration → expanded frames ──
         w = np.exp(logw[0, 0, :T]) * x_mask[0, 0, :T]
@@ -247,45 +271,86 @@ class TRTTSAdapter(TTSAdapter):
         z_p = (m_p_exp +
                np.random.randn(1, 256, Ty).astype(np.float32) *
                np.exp(logs_p_exp) * noise_scale)
+        t3 = time.perf_counter()
 
-        # ── 4. Flow (TRT GPU) ──
-        z, = self._trt_run(self._flow_eng,
-                            {"z_p": z_p, "y_mask": y_mask}, ["z"])
+        # ── 4. Flow (TRT GPU, fallback to ORT if too long) ──
+        flow_max = self._flow_eng.get_tensor_profile_shape("z_p", 0)[2][2]
+        if z_p.shape[2] > flow_max:
+            log.warning("[tts] z_p len %d exceeds TRT flow max %d, using ORT fallback", z_p.shape[2], flow_max)
+            import onnxruntime as _ort
+            if not hasattr(self, '_flow_ort'):
+                self._flow_ort = _ort.InferenceSession(
+                    os.path.join(self._trt_dir, "flow.onnx"),
+                    providers=["CPUExecutionProvider"])
+            z = self._flow_ort.run(None, {"z_p": z_p.astype(np.float32), "y_mask": y_mask.astype(np.float32)})[0]
+        else:
+            z, = self._trt_run(self._flow_eng,
+                                {"z_p": z_p, "y_mask": y_mask}, ["z"])
+        t4 = time.perf_counter()
 
-        # ── 5. Decoder (TRT GPU) → spec + phase ──
-        spec, phase = self._trt_run(self._dec_eng, {"z": z},
-                                     ["spec", "phase"])
+        # ── 5. Decoder (TRT GPU, fallback to ORT if too long) ──
+        dec_max = self._dec_eng.get_tensor_profile_shape("z", 0)[2][2]
+        if z.shape[2] > dec_max:
+            log.warning("[tts] z len %d exceeds TRT decoder max %d, using ORT fallback", z.shape[2], dec_max)
+            import onnxruntime as _ort
+            if not hasattr(self, '_dec_ort'):
+                self._dec_ort = _ort.InferenceSession(
+                    os.path.join(self._trt_dir, "decoder_spec.onnx"),
+                    providers=["CPUExecutionProvider"])
+            spec, phase = self._dec_ort.run(None, {"z": z.astype(np.float32)})
+        else:
+            spec, phase = self._trt_run(self._dec_eng, {"z": z},
+                                         ["spec", "phase"])
+        t5 = time.perf_counter()
 
-        # ── 6. iSTFT (NumPy) ──
+        # ── 6. iSTFT (NumPy, vectorized) ──
         n_fft, hop = 16, 4
         tf = np.fft.irfft(spec * np.exp(1j * phase), n=n_fft, axis=1)
         window = np.hanning(n_fft).astype(np.float32).reshape(1, n_fft, 1)
-        windowed = tf * window
+        windowed = tf * window  # [1, n_fft, T_frames]
         _, _, T_frames = tf.shape
         out_len = (T_frames - 1) * hop + n_fft
+        # Vectorized overlap-add via np.add.at
         audio = np.zeros((1, out_len), dtype=np.float32)
-        for i in range(T_frames):
-            audio[0, i * hop:i * hop + n_fft] += windowed[0, :, i]
+        idx = np.arange(T_frames) * hop  # [0, 4, 8, ...]
+        # for each position i in n_fft, add shifted windowed
+        for k in range(n_fft):
+            np.add.at(audio[0], idx + k, windowed[0, k, :])
         audio = audio[:, n_fft // 2:out_len - n_fft // 2]
 
-        # Apply speed (length_scale)
+        # Apply speed (length_scale) — vectorized linear interpolation
         if self._speed and self._speed != 1.0:
             target_len = int(audio.shape[1] / self._speed)
-            indices = np.linspace(0, audio.shape[1] - 1, target_len)
-            resampled = np.zeros((1, target_len), dtype=np.float32)
-            for i, idx in enumerate(indices):
-                lo, hi = int(np.floor(idx)), min(int(np.ceil(idx)), audio.shape[1] - 1)
-                frac = idx - lo
-                resampled[0, i] = audio[0, lo] * (1 - frac) + audio[0, hi] * frac
-            audio = resampled
+            xp = np.linspace(0, 1, audio.shape[1])
+            x = np.linspace(0, 1, target_len)
+            audio = np.interp(x, xp, audio[0]).reshape(1, -1).astype(np.float32)
 
-        # ── 7. Convert to PCM bytes ──
+        # ── 7. Convert to PCM bytes (vectorized) ──
         audio_f32 = audio[0]
-        pcm = struct.pack(f'<{len(audio_f32)}h',
-                          *[int(max(-32768, min(32767, s * 32767)))
-                            for s in audio_f32.tolist()])
-        for i in range(0, len(pcm), CHUNK_BYTES):
-            yield pcm[i:i + CHUNK_BYTES]
+        audio_i16 = np.clip(audio_f32 * 32767, -32768, 32767).astype(np.int16)
+        pcm = audio_i16.tobytes()
+        t6 = time.perf_counter()
+
+        dt_total = (t6 - t0) * 1000
+        audio_s = len(audio_f32) / 16000
+        log.info("[tts] chunk %d chars %d phones → Ty=%d T_frames=%d | "
+                 "text=%dms enc(ORT)=%dms mas=%dms flow(TRT)=%dms dec(TRT)=%dms istft+pcm=%dms | "
+                 "total=%dms audio=%.1fs",
+                 len(text), T, Ty, T_frames,
+                 int((t1-t0)*1000), int((t2-t1)*1000), int((t3-t2)*1000),
+                 int((t4-t3)*1000), int((t5-t4)*1000), int((t6-t5)*1000),
+                 int(dt_total), audio_s)
+
+        return audio_f32
+
+    def synthesize_stream(self, text: str):
+        # Split long text into chunks to stay within TRT engine profile limits
+        chunks = self._split_sentences(text)
+        for chunk_text in chunks:
+            audio_f32 = self._synthesize_chunk(chunk_text)
+            pcm = np.clip(audio_f32 * 32767, -32768, 32767).astype(np.int16).tobytes()
+            for i in range(0, len(pcm), CHUNK_BYTES):
+                yield pcm[i:i + CHUNK_BYTES]
 
 
 def _build_tts_adapter(cfg: dict) -> TTSAdapter:
