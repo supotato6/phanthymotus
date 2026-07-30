@@ -134,6 +134,8 @@ class TRTTSAdapter(TTSAdapter):
                     setattr(self, k, _HParams(**v) if isinstance(v, dict) else v)
         with open(os.path.join(model_dir, "config.json"), "r") as _f:
             hps = _HParams(**_json.load(_f))
+        self._n_fft = getattr(hps.model, 'gen_istft_n_fft', 16)
+        self._hop = getattr(hps.model, 'gen_istft_hop_size', 4)
 
         # ── ONNX Runtime encoder ──
         import onnxruntime as ort
@@ -304,9 +306,8 @@ class TRTTSAdapter(TTSAdapter):
         t5 = time.perf_counter()
 
         # ── 6. iSTFT (NumPy, vectorized) ──
-        # Read n_fft from config (default 64 for G_opt_v8, 16 for original)
-        n_fft = getattr(hps.model, 'gen_istft_n_fft', 64)
-        hop = getattr(hps.model, 'gen_istft_hop_size', 16)
+        n_fft = self._n_fft
+        hop = self._hop
         tf = np.fft.irfft(spec * np.exp(1j * phase), n=n_fft, axis=1)
         window = np.hanning(n_fft).astype(np.float32).reshape(1, n_fft, 1)
         windowed = tf * window  # [1, n_fft, T_frames]
