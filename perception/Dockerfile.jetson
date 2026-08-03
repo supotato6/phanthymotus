@@ -15,7 +15,9 @@ ARG PYPI_MIRROR
 ENV PIP_INDEX_URL=${PYPI_MIRROR} \
     PIP_EXTRA_INDEX_URL= \
     OMP_NUM_THREADS=1 \
-    OPENBLAS_NUM_THREADS=1
+    OPENBLAS_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_MMAP_THRESHOLD_=131072
 
 # ── System deps ──────────────────────────────────────────────────
 RUN rm -f /etc/apt/sources.list.d/* && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* && \
@@ -34,14 +36,15 @@ RUN cd /ros_ws && \
 RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     pyyaml requests onnxruntime && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
-    numpy pypinyin jieba wetext inflect g2p-en nltk cn2an
+    numpy pypinyin jieba wetext inflect g2p-en nltk cn2an && \
+    pip3 uninstall -y scipy 2>/dev/null; true
 
 # ── VITS2 model + source download ────────────────────────────────
 ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
 RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
     cd /models/vits2-mix && \
     curl -fsSL -o G_B_final_int8.pth "${MODEL_BASE_URL}/G_B_final_int8.pth" && \
-    curl -fsSL -o config.json "${MODEL_BASE_URL}/config_v8.json" && \
+    curl -fsSL -o config.json "${MODEL_BASE_URL}/config.json" && \
     for f in models.py modules.py commons.py attentions.py transforms.py stft.py utils.py monotonic_align.py; do \
         curl -fsSL -o "vits2/$f" "${MODEL_BASE_URL}/vits2_src/$f"; \
     done && \
@@ -65,7 +68,7 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
     echo "NLTK data installed"
 
-# ── TRT engines (pre-built with eval base image, TRT 10.4 compatible) ─
+# ── TRT engines v8 (n_fft=64) ──────────────────────────────────────
 ARG TRT_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/trt
 RUN mkdir -p /models/vits2-mix/trt && \
     cd /models/vits2-mix/trt && \
@@ -74,7 +77,18 @@ RUN mkdir -p /models/vits2-mix/trt && \
     curl -fsSL -o flow.onnx             "${TRT_BASE_URL}/flow.onnx" && \
     curl -fsSL -o decoder.trt           "${TRT_BASE_URL}/decoder.trt" && \
     curl -fsSL -o decoder_spec.onnx      "${TRT_BASE_URL}/decoder_spec.onnx" && \
-    echo "TRT engines:" && ls -lh
+    echo "TRT engines v8:" && ls -lh
+
+# ── TRT engines I128 (n_fft=128, G_v12_bznsyp_i128_m45_ep200) ──────
+ARG TRT_I128_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/i_128trt
+RUN mkdir -p /models/vits2-mix/trt_i128 && \
+    cd /models/vits2-mix/trt_i128 && \
+    curl -fsSL -o encoder_duration.onnx "${TRT_I128_URL}/encoder_duration.onnx" && \
+    curl -fsSL -o flow.trt              "${TRT_I128_URL}/flow.trt" && \
+    curl -fsSL -o flow.onnx             "${TRT_I128_URL}/flow.onnx" && \
+    curl -fsSL -o decoder.trt           "${TRT_I128_URL}/decoder.trt" && \
+    curl -fsSL -o decoder_spec.onnx      "${TRT_I128_URL}/decoder_spec.onnx" && \
+    echo "TRT engines I128:" && ls -lh
 
 # ── Application code ─────────────────────────────────────────────
 WORKDIR /work

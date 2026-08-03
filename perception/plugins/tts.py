@@ -131,8 +131,15 @@ class TRTTSAdapter(TTSAdapter):
     and NumPy for iSTFT.  Memory ~280MB vs ~850MB for PyTorch.
     """
 
+    # ── Model configs (n_fft, hop, iSTFT gain calibrated vs PT torch.istft) ──
+    _MODEL_CFG = {
+        "v8":   {"n_fft": 64,  "hop": 4, "gain": 0.166},   # G_opt_v8_final.pth
+        "i128": {"n_fft": 128, "hop": 4, "gain": 0.0833},  # G_v12_bznsyp_i128_m45_ep200.pth
+    }
+
     def __init__(self, model_dir: str, trt_dir: str,
-                 speaker_id: int = 0, speed: float = 1.0):
+                 speaker_id: int = 0, speed: float = 1.0,
+                 model_type: str = "v8"):
         self._speed = speed
         self._trt_dir = trt_dir
 
@@ -143,16 +150,15 @@ class TRTTSAdapter(TTSAdapter):
         self._clean_text = clean_text_mix
         self._seq_mix = cleaned_text_to_sequence_mix
 
-        # Read config directly — avoid importing vits2 (which requires torch)
-        import json as _json
-        class _HParams:
-            def __init__(self, **kw):
-                for k, v in kw.items():
-                    setattr(self, k, _HParams(**v) if isinstance(v, dict) else v)
-        with open(os.path.join(model_dir, "config.json"), "r") as _f:
-            hps = _HParams(**_json.load(_f))
-        self._n_fft = getattr(hps.model, 'gen_istft_n_fft', 16)
-        self._hop = getattr(hps.model, 'gen_istft_hop_size', 4)
+        # ── Model-specific iSTFT parameters ──
+        mc = self._MODEL_CFG.get(model_type, self._MODEL_CFG["v8"])
+        self._n_fft = mc["n_fft"]
+        self._hop = mc["hop"]
+        self._gain = mc["gain"]
+
+        # Periodic Hann window (matches TorchSTFT's fftbins=True)
+        from scipy.signal import get_window
+        self._window = get_window('hann', self._n_fft, fftbins=True).astype(np.float32).reshape(1, self._n_fft, 1)
 
         # ── ONNX Runtime encoder (shared across instances) ──
         encoder_path = os.path.join(trt_dir, "encoder_duration.onnx")
@@ -177,7 +183,8 @@ class TRTTSAdapter(TTSAdapter):
         self._cuda.cudaMemcpy.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                            ctypes.c_size_t, ctypes.c_int]
 
-        log.info(f"[tts] TRT adapter loaded: encoder={encoder_path}")
+        log.info("[tts] TRT adapter loaded: model=%s encoder=%s n_fft=%d hop=%d gain=%.4f",
+                 model_type, encoder_path, self._n_fft, self._hop, self._gain)
 
     def _gpu_alloc(self, size):
         ptr = ctypes.c_void_p(0)
@@ -260,21 +267,23 @@ class TRTTSAdapter(TTSAdapter):
             {"ph": ph, "to": to, "la": la, "xl": xl})
         t2 = time.perf_counter()
 
-        # ── 3. Duration → expanded frames ──
+        # ── 3. Duration → expanded frames (MAS monotonic alignment search) ──
+        # Use commons.generate_path (same as PT net.infer) for natural durations.
+        # Convert to torch for MAS, then back to numpy.
         w = np.exp(logw[0, 0, :T]) * x_mask[0, 0, :T]
-        w_ceil = np.ceil(w).astype(np.int32)
-        Ty = int(w_ceil.sum())
+        import torch as _torch
+        w_t = _torch.from_numpy(w.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,T]
+        w_ceil_t = _torch.ceil(w_t)
+        Ty = max(1, int(w_ceil_t.sum().item()))
         y_mask = np.ones((1, 1, Ty), dtype=np.float32)
-
-        dur = np.maximum(w_ceil, 1).astype(np.int32)
-        cumsum = np.concatenate([[0], np.cumsum(dur)[:-1]])
-        m_p_exp = np.zeros((1, 256, Ty), dtype=np.float32)
-        logs_p_exp = np.zeros((1, 256, Ty), dtype=np.float32)
-        for i, (d, pos) in enumerate(zip(dur, cumsum)):
-            if d > 0 and pos < Ty:
-                end = min(pos + d, Ty)
-                m_p_exp[0, :, pos:end] = m_p[0, :, i:i + 1]
-                logs_p_exp[0, :, pos:end] = logs_p[0, :, i:i + 1]
+        ym_t = _torch.ones(1, 1, Ty)
+        xm_t = _torch.from_numpy(x_mask)
+        am_t = _torch.unsqueeze(xm_t, 2) * _torch.unsqueeze(ym_t, -1)
+        attn_t = commons.generate_path(w_ceil_t, am_t)
+        m_p_t = _torch.from_numpy(m_p)
+        logs_p_t = _torch.from_numpy(logs_p)
+        m_p_exp = _torch.matmul(attn_t.squeeze(1), m_p_t.transpose(1, 2)).transpose(1, 2).numpy()
+        logs_p_exp = _torch.matmul(attn_t.squeeze(1), logs_p_t.transpose(1, 2)).transpose(1, 2).numpy()
 
         noise_scale = 0.667
         z_p = (m_p_exp +
@@ -316,8 +325,7 @@ class TRTTSAdapter(TTSAdapter):
         n_fft = self._n_fft
         hop = self._hop
         tf = np.fft.irfft(spec * np.exp(1j * phase), n=n_fft, axis=1)
-        window = np.hanning(n_fft).astype(np.float32).reshape(1, n_fft, 1)
-        windowed = tf * window  # [1, n_fft, T_frames]
+        windowed = tf * self._window  # [1, n_fft, T_frames] — periodic Hann window
         _, _, T_frames = tf.shape
         out_len = (T_frames - 1) * hop + n_fft
         # Vectorized overlap-add via np.add.at
@@ -330,7 +338,7 @@ class TRTTSAdapter(TTSAdapter):
         # NumPy irfft + overlap-add gain vs torch.istft.
         # Calibrated: PT_std / NP_raw_std ≈ 0.166 for n_fft=64, hop=4.
         # Verified corr=0.999 vs PyTorch G_opt_v8 reference.
-        audio = audio * 0.166
+        audio = audio * self._gain
 
         # Apply speed (length_scale) — vectorized linear interpolation
         if self._speed and self._speed != 1.0:
@@ -375,7 +383,8 @@ def _build_tts_adapter(cfg: dict) -> TTSAdapter:
     trt_dir = cfg.get("trt_dir", os.path.join(model_dir, "trt"))
     speaker_id = int(cfg.get("speaker_id", 0))
     speed = float(cfg.get("speed", 1.0))
-    return TRTTSAdapter(model_dir, trt_dir, speaker_id, speed)
+    model_type = cfg.get("model_type", "v8")  # "v8" or "i128"
+    return TRTTSAdapter(model_dir, trt_dir, speaker_id, speed, model_type)
 
 
 # ── ROS2 Node ─────────────────────────────────────────────────────────────────
