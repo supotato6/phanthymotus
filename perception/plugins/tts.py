@@ -269,22 +269,27 @@ class TRTTSAdapter(TTSAdapter):
         t2 = time.perf_counter()
 
         # ── 3. Duration → expanded frames (MAS monotonic alignment search) ──
-        # Use commons.generate_path (same as PT net.infer) for natural durations.
-        # Convert to torch for MAS, then back to numpy.
+        # Pure NumPy MAS (same logic as commons.generate_path + matmul).
         w = np.exp(logw[0, 0, :T]) * x_mask[0, 0, :T]
-        import torch as _torch
-        w_t = _torch.from_numpy(w.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,T]
-        w_ceil_t = _torch.ceil(w_t)
-        Ty = max(1, int(w_ceil_t.sum().item()))
+        w_ceil = np.ceil(w).astype(np.int32)
+        Ty = max(1, int(w_ceil.sum()))
         y_mask = np.ones((1, 1, Ty), dtype=np.float32)
-        ym_t = _torch.ones(1, 1, Ty)
-        xm_t = _torch.from_numpy(x_mask)
-        am_t = _torch.unsqueeze(xm_t, 2) * _torch.unsqueeze(ym_t, -1)
-        attn_t = commons.generate_path(w_ceil_t, am_t)
-        m_p_t = _torch.from_numpy(m_p)
-        logs_p_t = _torch.from_numpy(logs_p)
-        m_p_exp = _torch.matmul(attn_t.squeeze(1), m_p_t.transpose(1, 2)).transpose(1, 2).numpy()
-        logs_p_exp = _torch.matmul(attn_t.squeeze(1), logs_p_t.transpose(1, 2)).transpose(1, 2).numpy()
+
+        # MAS attention matrix: [1, T, Ty]
+        cum_dur = np.cumsum(w_ceil)
+        attn = np.zeros((1, T, Ty), dtype=np.float32)
+        for tx in range(T):
+            end_pos = int(cum_dur[tx])
+            start_pos = end_pos - int(w_ceil[tx])
+            if start_pos < Ty and end_pos > 0:
+                lo = max(start_pos, 0)
+                hi = min(end_pos, Ty)
+                if hi > lo:
+                    attn[0, tx, lo:hi] = 1.0
+
+        # Expand: [1, 256, T] @ [1, T, Ty] → [1, 256, Ty]
+        m_p_exp = np.matmul(m_p[:, :, :T], attn)
+        logs_p_exp = np.matmul(logs_p[:, :, :T], attn)
 
         noise_scale = 0.667
         z_p = (m_p_exp +
