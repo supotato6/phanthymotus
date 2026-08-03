@@ -7,6 +7,8 @@ plugins:
   tts:
     enabled: true
     model_dir: /models/vits2-mix
+    trt_dir: /models/vits2-mix/trt_i128
+    model_type: "i128"
     speaker_id: 0
     speed: 1.0
 
