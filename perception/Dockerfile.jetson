@@ -67,6 +67,7 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     curl -fsSL -o /tmp/nltk_3.zip "${MODEL_BASE_URL}/nltk/cmudict.zip" && \
     unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
     echo "NLTK data installed"
+    ENV NLTK_DATA=/models/vits2-mix/nltk_data
 
 # ── TRT engines v8 (n_fft=64) ──────────────────────────────────────
 ARG TRT_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/trt
