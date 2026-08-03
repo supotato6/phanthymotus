@@ -157,8 +157,9 @@ class TRTTSAdapter(TTSAdapter):
         self._gain = mc["gain"]
 
         # Periodic Hann window (matches TorchSTFT's fftbins=True)
-        from scipy.signal import get_window
-        self._window = get_window('hann', self._n_fft, fftbins=True).astype(np.float32).reshape(1, self._n_fft, 1)
+        # Equivalent to scipy.signal.get_window('hann', self._n_fft, fftbins=True)
+        w = np.hanning(self._n_fft + 1)[:self._n_fft].astype(np.float32)
+        self._window = w.reshape(1, self._n_fft, 1)
 
         # ── ONNX Runtime encoder (shared across instances) ──
         encoder_path = os.path.join(trt_dir, "encoder_duration.onnx")
@@ -325,19 +326,17 @@ class TRTTSAdapter(TTSAdapter):
         n_fft = self._n_fft
         hop = self._hop
         tf = np.fft.irfft(spec * np.exp(1j * phase), n=n_fft, axis=1)
-        windowed = tf * self._window  # [1, n_fft, T_frames] — periodic Hann window
-        _, _, T_frames = tf.shape
+        wf2d = tf[0] * self._window[0]  # [n_fft, T_frames]
+        _, T_frames = wf2d.shape
         out_len = (T_frames - 1) * hop + n_fft
-        # Vectorized overlap-add via np.add.at
-        audio = np.zeros((1, out_len), dtype=np.float32)
-        idx = np.arange(T_frames) * hop  # [0, 4, 8, ...]
-        # for each position i in n_fft, add shifted windowed
-        for k in range(n_fft):
-            np.add.at(audio[0], idx + k, windowed[0, k, :])
-        audio = audio[:, n_fft // 2:out_len - n_fft // 2]
-        # NumPy irfft + overlap-add gain vs torch.istft.
-        # Calibrated: PT_std / NP_raw_std ≈ 0.166 for n_fft=64, hop=4.
-        # Verified corr=0.999 vs PyTorch G_opt_v8 reference.
+        # Overlap-add via np.bincount (fast C implementation)
+        base = np.arange(T_frames, dtype=np.int32) * hop
+        offsets = np.arange(n_fft, dtype=np.int32)[:, None]
+        indices = (base + offsets).ravel()
+        audio = np.bincount(indices, weights=wf2d.ravel().astype(np.float64),
+                            minlength=out_len).astype(np.float32)
+        audio = audio[n_fft // 2:out_len - n_fft // 2].reshape(1, -1)
+        # iSTFT gain calibration (verified corr=0.999 vs PT torch.istft)
         audio = audio * self._gain
 
         # Apply speed (length_scale) — vectorized linear interpolation
