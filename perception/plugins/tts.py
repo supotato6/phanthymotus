@@ -135,6 +135,7 @@ class TRTTSAdapter(TTSAdapter):
     _MODEL_CFG = {
         "v8":   {"n_fft": 64,  "hop": 4, "gain": 0.166},   # G_opt_v8_final.pth
         "i128": {"n_fft": 128, "hop": 4, "gain": 0.0833},  # G_v12_bznsyp_i128_m45_ep200.pth
+        "mel20full_d50": {"n_fft": 128, "hop": 4, "gain": 0.0833},  # G_v12_bznsyp_mel20full_d50_ep50_merged.pth
     }
 
     def __init__(self, model_dir: str, trt_dir: str,

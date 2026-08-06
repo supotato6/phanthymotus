@@ -67,7 +67,8 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
     curl -fsSL -o /tmp/nltk_3.zip "${MODEL_BASE_URL}/nltk/cmudict.zip" && \
     unzip -qo /tmp/nltk_3.zip -d /models/vits2-mix/nltk_data/corpora/ && rm /tmp/nltk_3.zip && \
     echo "NLTK data installed"
-    ENV NLTK_DATA=/models/vits2-mix/nltk_data
+
+ENV NLTK_DATA=/models/vits2-mix/nltk_data
 
 # ── TRT engines v8 (n_fft=64) ──────────────────────────────────────
 ARG TRT_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/trt
@@ -90,6 +91,17 @@ RUN mkdir -p /models/vits2-mix/trt_i128 && \
     curl -fsSL -o decoder.trt           "${TRT_I128_URL}/decoder.trt" && \
     curl -fsSL -o decoder_spec.onnx      "${TRT_I128_URL}/decoder_spec.onnx" && \
     echo "TRT engines I128:" && ls -lh
+
+# ── TRT engines mel20full+d50 (n_fft=128, G_v12_bznsyp_mel20full_d50_ep50_merged) ──
+ARG TRT_MEL20FULL_D50_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit/mel20full_d50trt
+RUN mkdir -p /models/vits2-mix/trt_mel20full_d50 && \
+    cd /models/vits2-mix/trt_mel20full_d50 && \
+    curl -fsSL -o encoder_duration.onnx "${TRT_MEL20FULL_D50_URL}/encoder_duration.onnx" && \
+    curl -fsSL -o flow.trt              "${TRT_MEL20FULL_D50_URL}/flow.trt" && \
+    curl -fsSL -o flow.onnx             "${TRT_MEL20FULL_D50_URL}/flow.onnx" && \
+    curl -fsSL -o decoder.trt           "${TRT_MEL20FULL_D50_URL}/decoder.trt" && \
+    curl -fsSL -o decoder_spec.onnx      "${TRT_MEL20FULL_D50_URL}/decoder_spec.onnx" && \
+    echo "TRT engines mel20full_d50:" && ls -lh
 
 # ── Application code ─────────────────────────────────────────────
 WORKDIR /work
