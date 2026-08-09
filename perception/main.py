@@ -421,10 +421,18 @@ def main():
 
     threading.Thread(target=_spin, daemon=True, name="perception_spin").start()
 
-    # Start WebSocket ASR server in a separate thread
-    threading.Thread(target=_start_ws_thread, args=(ws_port,), daemon=True, name="ws_asr").start()
+    # WebSocket ASR server 只在 asr 插件启用时启动（obstacle 等专用镜像不启动）
+    if cfg.get("plugins", {}).get("asr", {}).get("enabled", False):
+        threading.Thread(target=_start_ws_thread, args=(ws_port,), daemon=True, name="ws_asr").start()
+        log.info(f"WebSocket ASR server → ws://0.0.0.0:{ws_port}")
+    else:
+        log.info("WebSocket ASR server disabled (asr plugin off)")
 
-    _start_registration(mcp_port, "Perception Stack", "perception")
+    # 注册/心跳到 agent-core：config.register=false 时关闭
+    if cfg.get("register", True):
+        _start_registration(mcp_port, "Perception Stack", "perception")
+    else:
+        log.info("agent-core registration disabled (register=false)")
 
     server = ThreadingHTTPServer(("", mcp_port), make_handler())
     log.info(f"MCP server → http://0.0.0.0:{mcp_port}")
