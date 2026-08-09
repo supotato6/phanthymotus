@@ -40,6 +40,21 @@ JSON-RPC POST `http://<host>:15720/mcp`，`tools/call`：
 - `perception/config.obstacle.yaml`：obstacle 启用版（obstacle 镜像用）
 - 模型目录 `/models/obstacle/`：室内 int8 引擎+isotonic json；室外 depth_int8 / seg_fp16 引擎
 
+## Jetson 实测（2026-08-09）
+
+镜像 `dustynv/ros:obstacle-trt`（TRT 10.4.0）+ 挂载代码/模型，MCP 端口 15730：
+
+| 测试 | 输入 | 返回 | 说明 |
+|---|---|---|---|
+| tools/list | - | 出现 `obstacle` 工具 | 注册正常 |
+| obstacle/info | - | state=ready | 三引擎+标定加载成功 |
+| obstacle/detect | indoor.png（TUM） | distance_m=2.468，152ms | 室内管线 |
+| obstacle/detect | outdoor_near.jpg（nuScenes，GT=3.89m 车） | distance_m=4.012，231ms | 室外管线，误差 0.12m |
+
+**版本坑**：室内引擎原先在 TRT 10.3 宿主构建，TRT 10.4 运行时反序列化报
+`engine plan file is not compatible`；已在 10.4 镜像内重建（int8 52.2MB / fp16 54.1MB），
+并替换 JuiceFS `obstacle_val_trt/` 下载源。**obstacle 部署链路里所有引擎必须是 TRT 10.4 构建。**
+
 ## 构建（Jetson 上）
 
 ```bash
