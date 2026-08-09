@@ -34,6 +34,16 @@ JSON-RPC POST `http://<host>:15720/mcp`，`tools/call`：
 
 室外引擎可换 `yolo26n-seg_int8.trt`（config 改 `seg_engine`）；当前默认 depth INT8 + seg FP16（INT8 seg 的掩码精度略低，F1@5m 降 ~0.08）。
 
+## 仅运行 obstacle
+
+obstacle 部署只加载障碍物接口，其它服务全部关闭：
+- 插件：asr / tts / htmsg / vop 均 `enabled: false`，仅 `obstacle.enabled: true`
+- WebSocket ASR 服务器：main.py 按 `plugins.asr.enabled` 启动，关闭时不再监听 ws_port
+- agent-core 注册心跳：`register: false` 时关闭
+
+Jetson 实测（2026-08-09，端口 15730）：日志仅出现 `ObstaclePlugin loaded` /
+`MCP server`，无 ws_asr / registration 线程；室内 png → 2.468m、室外 jpg(GT=3.89m) → 4.012m。
+
 ## 配置
 
 - `perception/config.yaml`：`plugins.obstacle.enabled: false`（默认关，不影响既有镜像）
