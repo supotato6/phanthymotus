@@ -17,7 +17,7 @@ plugins:
     enabled: false
 
   obstacle:
-    enabled: false
+    enabled: true
     model_dir: /models/obstacle
     indoor:
       engine: depth_anything_v2_metric_hypersim_vits_int8.trt

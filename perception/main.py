@@ -87,6 +87,11 @@ class PerceptionBundle:
             self._plugins.append(plugin)
             log.info("VideoObjectPerceptionPlugin loaded (namespace=%s)", namespace)
 
+        if plugins_cfg.get("obstacle", {}).get("enabled", False):
+            from plugins.obstacle import ObstaclePlugin
+            self._plugins.append(ObstaclePlugin(plugins_cfg["obstacle"], executor))
+            log.info("ObstaclePlugin loaded")
+
     def get_all_tools(self) -> list:
         tools = []
         for p in self._plugins:

@@ -1,0 +1,33 @@
+# ── Obstacle 感知镜像（室内 png / 室外 jpg，TRT 10.4.0）────────────
+# 构建：cd repo-root && docker build -f perception/Dockerfile.obstacle --network=host -t phanthymotus-obstacle:latest .
+# 说明：引擎绑定 Jetson + TRT 10.4.0，必须与部署机同版本同设备。
+
+ARG ROS_BASE=docker.m.daocloud.io/dustynv/ros:humble-desktop-l4t-r36.4.0
+FROM ${ROS_BASE}
+
+# ── 修复 TRT python：镜像内 DLA/驱动库为 0 字节空文件，注入 Jetson 宿主真实库 ──
+COPY deploy/obstacle/jetson-libs/*.so* /usr/lib/aarch64-linux-gnu/nvidia/
+RUN ln -sf libcudla.so.1.0.0 /usr/lib/aarch64-linux-gnu/nvidia/libcudla.so.1 && \
+    ldconfig && \
+    python3 -c "import tensorrt, cv2, numpy; print('TRT', tensorrt.__version__, 'cv2', cv2.__version__, 'numpy', numpy.__version__)"
+
+# ── 模型/引擎下载（JuiceFS HTTP）────────────────────────────────
+ARG INDOOR_TRT_URL=http://172.28.4.81:34567/zhangjinghong/obstacle_val_trt
+ARG OUTDOOR_TRT_URL=http://172.28.4.81:34567/zhangjinghong/obstacle_val_trt_outdoor
+RUN mkdir -p /models/obstacle && cd /models/obstacle && \
+    curl -fsSL -o depth_anything_v2_metric_hypersim_vits_int8.trt "${INDOOR_TRT_URL}/depth_anything_v2_metric_hypersim_vits_int8.trt" && \
+    curl -fsSL -o calib_isotonic_d_roi_min.json "${INDOOR_TRT_URL}/calib_isotonic_d_roi_min.json" && \
+    curl -fsSL -o yolo26n-depth_int8.trt "${OUTDOOR_TRT_URL}/yolo26n-depth_int8.trt" && \
+    curl -fsSL -o yolo26n-seg_fp16.trt "${OUTDOOR_TRT_URL}/yolo26n-seg_fp16.trt" && \
+    echo "obstacle models:" && ls -lh /models/obstacle
+
+# ── 应用代码（config.obstacle.yaml 启用 obstacle 插件）────────────
+WORKDIR /work
+COPY perception/main.py /work/main.py
+COPY perception/plugins/ /work/plugins/
+COPY perception/utils/ /work/utils/
+COPY perception/config.obstacle.yaml /work/config.yaml
+
+ENV CONFIG_PATH=/work/config.yaml
+EXPOSE 15720 15721
+CMD ["/bin/bash", "-c", "source /opt/ros/humble/install/setup.bash && python3 /work/main.py"]
