@@ -1,66 +1,34 @@
-# ── VITS2 INT8 TTS ──────────────────────────────────────────────
-# Base: official phanthy-motus perception (jp511-torch, ROS Humble)
-# Overlays VITS2-Mix INT8 model + G2P frontend
-# ────────────────────────────────────────────────────────────────
+# ── Obstacle 感知镜像（室内 png / 室外 jpg，TRT 10.4.0）────────────
+# 构建：cd repo-root && docker build -f perception/Dockerfile.jetson --network=host -t phanthymotus-obstacle:latest .
+# 注意：Darvin 部署固定用 Dockerfile.jetson；Dockerfile.obstacle 为同名副本（两者保持同步）。
+# 说明：引擎绑定 Jetson + TRT 10.4.0，必须与部署机同版本同设备。
 
-ARG BASE_IMAGE=bj-warehouse.tencentcloudcr.com/phanthy-motus/jetson-base:jp511-torch
-FROM ${BASE_IMAGE}
+ARG ROS_BASE=docker.m.daocloud.io/dustynv/ros:humble-desktop-l4t-r36.4.0
+FROM ${ROS_BASE}
 
-# ── System deps ────────────────────────────────────────────────
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends espeak-ng ffmpeg && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# ── 修复 TRT python：镜像内 DLA/驱动库为 0 字节空文件，注入 Jetson 宿主真实库 ──
+COPY deploy/obstacle/jetson-libs/*.so* /usr/lib/aarch64-linux-gnu/nvidia/
+RUN ln -sf libcudla.so.1.0.0 /usr/lib/aarch64-linux-gnu/nvidia/libcudla.so.1 && \
+    ldconfig && \
+    python3 -c "import tensorrt, cv2, numpy; print('TRT', tensorrt.__version__, 'cv2', cv2.__version__, 'numpy', numpy.__version__)"
 
-# ── audio_msgs ──────────────────────────────────────────────────
-COPY deploy/ros-base/audio_msgs/ /ros_ws/src/audio_msgs/
-RUN cd /ros_ws && \
-    . /opt/ros/humble/install/setup.bash && \
-    colcon build --packages-select audio_msgs --cmake-args -DCMAKE_BUILD_TYPE=Release
+# ── 模型/引擎下载（JuiceFS HTTP）────────────────────────────────
+ARG INDOOR_TRT_URL=http://172.28.4.81:34567/zhangjinghong/obstacle_val_trt
+ARG OUTDOOR_TRT_URL=http://172.28.4.81:34567/zhangjinghong/obstacle_val_trt_outdoor
+RUN mkdir -p /models/obstacle && cd /models/obstacle && \
+    curl -fsSL -o depth_anything_v2_metric_hypersim_vits_int8.trt "${INDOOR_TRT_URL}/depth_anything_v2_metric_hypersim_vits_int8.trt" && \
+    curl -fsSL -o calib_isotonic_d_roi_min.json "${INDOOR_TRT_URL}/calib_isotonic_d_roi_min.json" && \
+    curl -fsSL -o yolo26n-depth_int8.trt "${OUTDOOR_TRT_URL}/yolo26n-depth_int8.trt" && \
+    curl -fsSL -o yolo26n-seg_fp16.trt "${OUTDOOR_TRT_URL}/yolo26n-seg_fp16.trt" && \
+    echo "obstacle models:" && ls -lh /models/obstacle
 
-# ── Python deps (--no-deps for torch safety) ──────────────────
-RUN pip3 install --no-cache-dir \
-    pyyaml requests websockets dashscope && \
-    pip3 install --no-cache-dir --no-deps silero-vad && \
-    pip3 install --no-cache-dir \
-    numpy scipy pypinyin jieba soundfile wetext inflect g2p-en nltk cn2an
-
-# ── VITS2 model + source download ──────────────────────────────
-ARG MODEL_BASE_URL=http://172.28.4.81:34567/zhangjinghong/vits2_submit
-RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vits2-mix/tn_cache && \
-    cd /models/vits2-mix && \
-    curl -fsSL -o G_B_final_int8.pth "${MODEL_BASE_URL}/G_B_final_int8.pth" && \
-    curl -fsSL -o config.json "${MODEL_BASE_URL}/config.json" && \
-    for f in models.py modules.py commons.py attentions.py transforms.py stft.py utils.py monotonic_align.py; do \
-        curl -fsSL -o "vits2/$f" "${MODEL_BASE_URL}/vits2_src/$f"; \
-    done && \
-    curl -fsSL -o vits2/text/__init__.py "${MODEL_BASE_URL}/vits2_src/text/__init__.py" && \
-    curl -fsSL -o vits2/text/symbols.py "${MODEL_BASE_URL}/vits2_src/text/symbols.py" && \
-    for f in __init__.py cleaner.py chinese.py english.py heteronym.py tone_sandhi.py unified_g2p.py symbols.py cmudict.rep cmudict_cache.pickle; do \
-        curl -fsSL -o "frontend/$f" "${MODEL_BASE_URL}/frontend/$f"; \
-    done && \
-    curl -fsSL -o frontend/opencpop-strict.txt "${MODEL_BASE_URL}/opencpop-strict.txt" && \
-    for f in zh_tn_tagger.fst zh_tn_verbalizer.fst en_tn_tagger.fst en_tn_verbalizer.fst; do \
-        curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
-    done && \
-    echo "Model files:" && ls -lh G_B_final_int8.pth config.json
-
-# ── Application code ───────────────────────────────────────────
+# ── 应用代码（config.obstacle.yaml 启用 obstacle 插件）────────────
 WORKDIR /work
-COPY perception/main.py    /work/main.py
-COPY perception/plugins/   /work/plugins/
-COPY perception/utils/     /work/utils/
-COPY perception/config.yaml /work/config.yaml
+COPY perception/main.py /work/main.py
+COPY perception/plugins/ /work/plugins/
+COPY perception/utils/ /work/utils/
+COPY perception/config.obstacle.yaml /work/config.yaml
 
+ENV CONFIG_PATH=/work/config.yaml
 EXPOSE 15720 15721
-
-RUN find /ros_ws/install -name "site-packages" -type d > /usr/local/lib/python3.8/dist-packages/ros_ws.pth && \
-    find /opt/ros/humble/install -name "site-packages" -type d >> /usr/local/lib/python3.8/dist-packages/ros_ws.pth
-
-ENV LD_LIBRARY_PATH="/ros_ws/install/audio_msgs/lib:/opt/ros/humble/install/lib:${LD_LIBRARY_PATH}"
-ENV AMENT_PREFIX_PATH="/ros_ws/install/audio_msgs:/opt/ros/humble/install"
-
-CMD ["/bin/bash", "-c", \
-    "export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 && \
-     source /opt/ros/humble/install/setup.bash && \
-     source /ros_ws/install/setup.bash && \
-     python3 /work/main.py"]
+CMD ["/bin/bash", "-c", "source /opt/ros/humble/install/setup.bash && python3 /work/main.py"]
