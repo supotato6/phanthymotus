@@ -29,8 +29,10 @@ COPY perception/plugins/ /work/plugins/
 COPY perception/utils/ /work/utils/
 COPY perception/config.obstacle.yaml /work/config.yaml
 COPY perception/config/fastdds_large_message.xml /work/config/fastdds_large_message.xml
+RUN mkdir -p /opt/phanthy-motus/config && \
+    cp /work/config/fastdds_large_message.xml /opt/phanthy-motus/config/fastdds_large_message.xml
 
 ENV CONFIG_PATH=/work/config.yaml
-ENV FASTRTPS_DEFAULT_PROFILES_FILE=/work/config/fastdds_large_message.xml
+ENV FASTRTPS_DEFAULT_PROFILES_FILE=/opt/phanthy-motus/config/fastdds_large_message.xml
 EXPOSE 15720 15721
 CMD ["/bin/bash", "-c", "source /opt/ros/humble/install/setup.bash && python3 /work/main.py"]
