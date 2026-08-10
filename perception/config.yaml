@@ -18,6 +18,7 @@ plugins:
 
   obstacle:
     enabled: true
+    output_topic: "{input_topic}/obstacle"
     provider: local
     url: ""
     key: ""

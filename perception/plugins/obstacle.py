@@ -49,7 +49,7 @@ TOOLS = [
                 "action": {"type": "string", "enum": ["info", "detect", "start", "stop", "config"]},
                 "image_path": {"type": "string", "description": "输入图片路径，扩展名决定室内/室外"},
                 "input_topic": {"type": "string", "description": "ROS2 CompressedImage 话题（action=start 必填）"},
-                "output_topic": {"type": "string", "description": "ROS2 输出话题，默认 {input_topic}/obstacle_distance"},
+                "output_topic": {"type": "string", "description": "ROS2 输出话题，默认 {input_topic}/obstacle"},
                 "mode": {"type": "string", "enum": ["auto", "indoor", "outdoor"], "default": "auto"},
             },
             "required": ["action"],
@@ -171,7 +171,7 @@ _LOW_LAT_QOS = QoSProfile(
     durability=DurabilityPolicy.VOLATILE,
 )
 _PUB_QOS = QoSProfile(
-    reliability=ReliabilityPolicy.BEST_EFFORT,
+    reliability=ReliabilityPolicy.RELIABLE,   # 评测服务默认 RELIABLE 订阅，BEST_EFFORT 发布会 QoS 不兼容
     history=HistoryPolicy.KEEP_LAST,
     depth=10,
     durability=DurabilityPolicy.VOLATILE,
@@ -181,7 +181,7 @@ _PUB_QOS = QoSProfile(
 class _ObstacleDistanceNode(Node):
     """ROS2 障碍物距离节点：订阅 CompressedImage -> 推理 -> 发布 {"pred_distance": ...}。
 
-    输出话题默认 f"{input_topic}/obstacle_distance"（vop 同款 {input_topic}/ 后缀惯例）。
+    输出话题默认 f"{input_topic}/obstacle"（评测服务约定，如 /benchmark/camera/image/obstacle_local_10/obstacle）。
     """
 
     def __init__(self, plugin, input_topic: str, output_topic: str, node_suffix: str):
@@ -280,7 +280,7 @@ class ObstaclePlugin:
         self._lock = threading.Lock()
         self._executor = executor
         self._decision_threshold_m = float(plugin_cfg.get("decision_threshold_m", 2.0))
-        self._output_topic_tpl = plugin_cfg.get("output_topic", "{input_topic}/obstacle_distance")
+        self._output_topic_tpl = plugin_cfg.get("output_topic", "{input_topic}/obstacle")
         self._nodes: dict[str, _ObstacleDistanceNode] = {}
         self._indoor_eng: Optional[_TrtEngine] = None
         self._out_depth_eng: Optional[_TrtEngine] = None
