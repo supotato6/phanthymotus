@@ -82,3 +82,19 @@ Dockerfile 内已注入修复 TRT python 所需的 Jetson DLA/驱动库（镜像
 - `curl -X POST http://localhost:15720/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` → 应出现 `obstacle`
 - `obstacle/info` → state=ready
 - 用室内 png / 室外 jpg 各测一张 `obstacle/detect`
+
+## ROS2 接口（基准线）
+
+`ObstacleDistancePlugin` 支持 ROS2 订阅推理（vop 同款多实例节点）：
+
+- `action=start`，参数 `input_topic`（如 `/benchmark/camera/image/obstacle_local_10`）→ 创建节点
+  - 订阅 `sensor_msgs/CompressedImage`（支持 png/jpg，大图需 FastDDS 大消息配置 `perception/config/fastdds_large_message.xml`）
+  - 按 `format` 分流：png → 室内，jpg/jpeg → 室外
+  - 发布 `std_msgs/String` JSON `{"pred_distance": <float>}` 到 `{input_topic}/obstacle_distance`（可用 `output_topic` 配置覆盖）
+- `action=stop` / `action=config` / `action=info` 管理节点生命周期
+- MCP `action=detect`（image_path）与 ROS2 路径并存
+
+示例发布：
+```
+[obstacle] ros2 result: topic=.../obstacle_distance mode=indoor pred_distance=2.468 fallback=False n=1
+```

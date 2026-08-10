@@ -18,10 +18,16 @@ import ctypes
 import json
 import logging
 import os
+import queue
 import threading
 import time
 
 import cv2
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import String
 from ctypes import POINTER, c_void_p, byref, c_size_t
 from typing import Optional
 
@@ -35,13 +41,15 @@ TOOLS = [
     {
         "name": "obstacle",
         "type": "processor",
-        "multiInstance": False,
+        "multiInstance": True,
         "description": "障碍物距离检测：png=室内(DA2 metric INT8+ROI min+isotonic)，jpg=室外(yolo26n depth+seg -> 掩码 p5)",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["info", "detect", "start", "stop", "config"]},
                 "image_path": {"type": "string", "description": "输入图片路径，扩展名决定室内/室外"},
+                "input_topic": {"type": "string", "description": "ROS2 CompressedImage 话题（action=start 必填）"},
+                "output_topic": {"type": "string", "description": "ROS2 输出话题，默认 {input_topic}/obstacle_distance"},
                 "mode": {"type": "string", "enum": ["auto", "indoor", "outdoor"], "default": "auto"},
             },
             "required": ["action"],
@@ -156,6 +164,113 @@ def _unwrap_depth(depth, oh, ow, r, dw, dh):
     return cv2.resize(d, (ow, oh), interpolation=cv2.INTER_LINEAR)
 
 
+_LOW_LAT_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=2,
+    durability=DurabilityPolicy.VOLATILE,
+)
+_PUB_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=10,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
+
+class _ObstacleDistanceNode(Node):
+    """ROS2 障碍物距离节点：订阅 CompressedImage -> 推理 -> 发布 {"pred_distance": ...}。
+
+    输出话题默认 f"{input_topic}/obstacle_distance"（vop 同款 {input_topic}/ 后缀惯例）。
+    """
+
+    def __init__(self, plugin, input_topic: str, output_topic: str, node_suffix: str):
+        super().__init__(f"obstacle_{node_suffix}")
+        self._plugin = plugin
+        self._input_topic = input_topic
+        self._output_topic = output_topic
+        self._pub = self.create_publisher(String, self._output_topic, _PUB_QOS)
+        self._sub = None
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._stop_event = threading.Event()
+        self._worker = None
+        self._detect_count = 0
+
+    def start(self) -> dict:
+        if self._sub is not None:
+            return {"state": "running", "input": self._input_topic, "output": self._output_topic}
+        self._stop_event.clear()
+        self._sub = self.create_subscription(
+            CompressedImage, self._input_topic, self._image_cb, _LOW_LAT_QOS
+        )
+        self._worker = threading.Thread(target=self._inference_worker, daemon=True,
+                                        name=f"obstacle_ros_{self._input_topic}")
+        self._worker.start()
+        log.info(f"[obstacle] ros2 started: {self._input_topic} -> {self._output_topic}")
+        return {"state": "running", "input": self._input_topic, "output": self._output_topic}
+
+    def stop(self) -> dict:
+        if self._sub is not None:
+            self.destroy_subscription(self._sub)
+            self._sub = None
+        self._stop_event.set()
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=3.0)
+        self._worker = None
+        log.info(f"[obstacle] ros2 stopped: {self._input_topic}")
+        return {"state": "idle", "input": self._input_topic}
+
+    def _image_cb(self, msg: CompressedImage):
+        fmt = msg.format or ""
+        try:
+            self._frame_queue.put_nowait((msg.data, fmt))
+        except queue.Full:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._frame_queue.put_nowait((msg.data, fmt))
+            except queue.Full:
+                pass
+
+    def _inference_worker(self):
+        while not self._stop_event.is_set():
+            try:
+                data, fmt = self._frame_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    log.warning(f"[obstacle] ros2 decode failed: {self._input_topic}")
+                    continue
+                mode = self._pick_mode(fmt, frame)
+                with self._plugin._lock:
+                    if mode == "indoor":
+                        dist, info = self._plugin._detect_indoor(frame)
+                    else:
+                        dist, info = self._plugin._detect_outdoor(frame)
+                payload = json.dumps({"pred_distance": round(float(dist), 3)})
+                self._pub.publish(String(data=payload))
+                self._detect_count += 1
+                log.info(f"[obstacle] ros2 result: topic={self._output_topic} mode={mode} "
+                         f"pred_distance={round(float(dist), 3)} fallback={bool(info.get('fallback', False))} "
+                         f"n={self._detect_count}")
+            except Exception as e:
+                log.error(f"[obstacle] ros2 inference error: {e}", exc_info=True)
+
+    @staticmethod
+    def _pick_mode(fmt: str, frame) -> str:
+        f = fmt.lower()
+        if "png" in f:
+            return "indoor"
+        if "jpg" in f or "jpeg" in f:
+            return "outdoor"
+        h, w = frame.shape[:2]
+        return "outdoor" if w > h * 1.6 else "indoor"
+
+
 class ObstaclePlugin:
     PREFIX = "obstacle"
 
@@ -163,7 +278,10 @@ class ObstaclePlugin:
         self._cfg = plugin_cfg
         self._model_dir = plugin_cfg.get("model_dir", "/models/obstacle")
         self._lock = threading.Lock()
+        self._executor = executor
         self._decision_threshold_m = float(plugin_cfg.get("decision_threshold_m", 2.0))
+        self._output_topic_tpl = plugin_cfg.get("output_topic", "{input_topic}/obstacle_distance")
+        self._nodes: dict[str, _ObstacleDistanceNode] = {}
         self._indoor_eng: Optional[_TrtEngine] = None
         self._out_depth_eng: Optional[_TrtEngine] = None
         self._out_seg_eng: Optional[_TrtEngine] = None
@@ -213,11 +331,44 @@ class ObstaclePlugin:
             }
         if action == "detect":
             return self._detect(args)
-        if action in ("start", "stop", "config"):
-            # 无状态插件：引擎在 init 时已加载，生命周期 action 仅回执状态
+        if action == "start":
+            return self._ros2_start(args)
+        if action == "stop":
+            return self._ros2_stop(args)
+        if action == "config":
             return {"ok": True, "action": action, "state": self._load_status,
-                    "name": "Obstacle", "error": self._load_error}
+                    "name": "Obstacle", "nodes": list(self._nodes.keys()),
+                    "output_topic": self._output_topic_tpl, "error": self._load_error}
         return {"ok": False, "error": f"unsupported action: {action}", "name": "Obstacle"}
+
+    # ── ROS2 节点生命周期（vop 同款多实例）───────────────────────────────
+    def _ros2_start(self, args: dict) -> dict:
+        if self._load_status != "ready":
+            return {"ok": False, "error": f"models not ready: {self._load_error or self._load_status}"}
+        input_topic = (args.get("input_topic") or self._cfg.get("input_topic") or "").strip()
+        if not input_topic:
+            return {"ok": False, "error": "input_topic is required for action=start"}
+        if input_topic in self._nodes:
+            return self._nodes[input_topic].start()
+        output_topic = (args.get("output_topic") or self._output_topic_tpl).format(input_topic=input_topic)
+        suffix = input_topic.replace("/", "_").replace("-", "_")
+        node = _ObstacleDistanceNode(self, input_topic, output_topic, suffix)
+        self._executor.add_node(node)
+        self._nodes[input_topic] = node
+        return node.start()
+
+    def _ros2_stop(self, args: dict) -> dict:
+        input_topic = (args.get("input_topic") or "").strip()
+        if input_topic and input_topic in self._nodes:
+            node = self._nodes.pop(input_topic)
+            node.stop()
+            self._executor.remove_node(node)
+            return {"state": "idle", "input": input_topic}
+        for k in list(self._nodes.keys()):
+            self._nodes[k].stop()
+            self._executor.remove_node(self._nodes[k])
+        self._nodes.clear()
+        return {"state": "idle"}
 
     # ── 检测入口 ──────────────────────────────────────────────────────────
     def _detect(self, args: dict) -> dict:
