@@ -22,6 +22,7 @@ plugins:
   obstacle:
     enabled: true
     output_topic: "{input_topic}/obstacle"
+    lazy_load: true   # 按模式懒加载引擎，省显存（默认开）
     provider: local
     url: ""
     key: ""

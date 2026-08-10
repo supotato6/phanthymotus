@@ -98,3 +98,9 @@ Dockerfile 内已注入修复 TRT python 所需的 Jetson DLA/驱动库（镜像
 ```
 [obstacle] ros2 result: topic=.../obstacle_distance mode=indoor pred_distance=2.468 fallback=False n=1
 ```
+
+## 内存优化（8GB Jetson）
+
+- **缓冲复用**：`_TrtEngine` 缓存 device/pinned-host 缓冲，跨帧复用，不再每帧 cudaMalloc/Free（消除分配抖动与碎片）。
+- **按模式懒加载**：`lazy_load: true`（默认开）——室内/室外引擎按需加载，只跑室内就不加载室外引擎，省显存；`info` 返回 `loaded` 列表。首帧会多 1-2s 加载时间。
+- 运行期系统内存基线（Jetson 8GB）：本服务约数百 MB，与 TTS/agent-core 共存时注意剩余内存；benchmark 前可停掉不需要的容器。

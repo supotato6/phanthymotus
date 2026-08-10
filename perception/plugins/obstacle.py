@@ -110,39 +110,100 @@ class _TrtEngine:
             getattr(self._rt, fn).argtypes = args
             getattr(self._rt, fn).restype = ctypes.c_int
 
-    def run(self, x: np.ndarray) -> list[np.ndarray]:
-        """x: [1,3,H,W] float32 归一化输入；返回输出 numpy 列表。"""
-        x = np.ascontiguousarray(x)
-        outs = [np.empty(tuple(self.engine.get_tensor_shape(nm)), np.float32) for nm in self.out_names]
-        in_dev = c_void_p(); in_host = c_void_p()
-        rc = self._rt.cudaMalloc(byref(in_dev), c_size_t(x.nbytes))
-        if rc != 0:
-            raise RuntimeError(f"cudaMalloc failed rc={rc}")
-        rc = self._rt.cudaMallocHost(byref(in_host), c_size_t(x.nbytes))
-        if rc != 0:
-            self._rt.cudaFree(in_dev)
-            raise RuntimeError(f"cudaMallocHost failed rc={rc}")
-        ctypes.memmove(in_host, x.ctypes.data_as(c_void_p), x.nbytes)
-        self._rt.cudaMemcpy(in_dev, in_host, c_size_t(x.nbytes), 2)
-        devs, hosts = [in_dev], [in_host]
-        try:
-            for o in outs:
-                d = c_void_p(); self._rt.cudaMalloc(byref(d), c_size_t(o.nbytes))
-                h = c_void_p(); self._rt.cudaMallocHost(byref(h), c_size_t(o.nbytes))
-                devs.append(d); hosts.append(h)
-            self.ctx.set_tensor_address(self.in_name, int(in_dev.value))
-            for i, nm in enumerate(self.out_names):
-                self.ctx.set_tensor_address(nm, int(devs[i + 1].value))
-            ok = self.ctx.execute_v2([int(d.value) for d in devs])
-            if not ok:
-                raise RuntimeError("engine execute failed")
-            for i, (o, d, h) in enumerate(zip(outs, devs[1:], hosts[1:])):
-                self._rt.cudaMemcpy(h, d, c_size_t(o.nbytes), 1)
-                ctypes.memmove(o.ctypes.data_as(c_void_p), h, o.nbytes)
-        finally:
-            for d, h in zip(devs, hosts):
+    def __init__(self, engine_path: str):
+        import tensorrt as trt
+        self._trt = trt
+        runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+        with open(engine_path, "rb") as f:
+            self.engine = runtime.deserialize_cuda_engine(f.read())
+        if self.engine is None:
+            raise RuntimeError(f"engine load failed: {engine_path}")
+        self.ctx = self.engine.create_execution_context()
+        self.out_names = []
+        for i in range(self.engine.num_io_tensors):
+            nm = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(nm) == trt.TensorIOMode.OUTPUT:
+                self.out_names.append(nm)
+        self.in_name = self.engine.get_tensor_name(0)
+        self._rt = ctypes.CDLL("libcudart.so.12")
+        for fn, args in [
+            ("cudaMalloc", [POINTER(c_void_p), c_size_t]),
+            ("cudaMallocHost", [POINTER(c_void_p), c_size_t]),
+            ("cudaMemcpy", [c_void_p, c_void_p, c_size_t, ctypes.c_int]),
+            ("cudaFree", [c_void_p]),
+            ("cudaFreeHost", [c_void_p]),
+        ]:
+            getattr(self._rt, fn).argtypes = args
+            getattr(self._rt, fn).restype = ctypes.c_int
+        # 缓冲缓存：按需分配一次、跨帧复用，避免每帧 cudaMalloc/Free 抖动
+        self._in_dev = None
+        self._in_host = None
+        self._in_bytes = 0
+        self._out_devs = []
+        self._out_hosts = []
+        self._out_bytes = []
+
+    def _ensure_buffers(self, in_nbytes, out_nbytes_list):
+        if self._in_dev is not None and self._in_bytes >= in_nbytes:
+            pass
+        else:
+            if self._in_dev is not None:
+                self._rt.cudaFree(self._in_dev)
+                self._rt.cudaFreeHost(self._in_host)
+            d = c_void_p(); rc = self._rt.cudaMalloc(byref(d), c_size_t(in_nbytes))
+            if rc != 0:
+                raise RuntimeError(f"cudaMalloc failed rc={rc}")
+            h = c_void_p(); rc = self._rt.cudaMallocHost(byref(h), c_size_t(in_nbytes))
+            if rc != 0:
+                self._rt.cudaFree(d)
+                raise RuntimeError(f"cudaMallocHost failed rc={rc}")
+            self._in_dev, self._in_host, self._in_bytes = d, h, in_nbytes
+        if len(self._out_devs) != len(out_nbytes_list):
+            for d, h in zip(self._out_devs, self._out_hosts):
                 self._rt.cudaFree(d)
                 self._rt.cudaFreeHost(h)
+            self._out_devs, self._out_hosts, self._out_bytes = [], [], []
+            for nb in out_nbytes_list:
+                d = c_void_p(); rc = self._rt.cudaMalloc(byref(d), c_size_t(nb))
+                if rc != 0:
+                    raise RuntimeError(f"cudaMalloc out failed rc={rc}")
+                h = c_void_p(); rc = self._rt.cudaMallocHost(byref(h), c_size_t(nb))
+                if rc != 0:
+                    self._rt.cudaFree(d)
+                    raise RuntimeError(f"cudaMallocHost out failed rc={rc}")
+                self._out_devs.append(d)
+                self._out_hosts.append(h)
+                self._out_bytes.append(nb)
+
+    def close(self):
+        if self._in_dev is not None:
+            self._rt.cudaFree(self._in_dev)
+            self._rt.cudaFreeHost(self._in_host)
+            self._in_dev = self._in_host = None
+        for d, h in zip(self._out_devs, self._out_hosts):
+            self._rt.cudaFree(d)
+            self._rt.cudaFreeHost(h)
+        self._out_devs, self._out_hosts = [], []
+
+    def run(self, x: np.ndarray) -> list[np.ndarray]:
+        """x: [1,3,H,W] float32 归一化输入；返回输出 numpy 列表（复用缓冲）。"""
+        x = np.ascontiguousarray(x)
+        outs = [np.empty(tuple(self.engine.get_tensor_shape(nm)), np.float32) for nm in self.out_names]
+        self._ensure_buffers(x.nbytes, [o.nbytes for o in outs])
+        ctypes.memmove(self._in_host, x.ctypes.data_as(c_void_p), x.nbytes)
+        rc = self._rt.cudaMemcpy(self._in_dev, self._in_host, c_size_t(x.nbytes), 2)
+        if rc != 0:
+            raise RuntimeError(f"cudaMemcpy failed rc={rc}")
+        devs = [self._in_dev] + self._out_devs
+        self.ctx.set_tensor_address(self.in_name, int(self._in_dev.value))
+        for i, nm in enumerate(self.out_names):
+            self.ctx.set_tensor_address(nm, int(self._out_devs[i].value))
+        ok = self.ctx.execute_v2([int(d.value) for d in devs])
+        if not ok:
+            raise RuntimeError("engine execute failed")
+        for i, (o, h) in enumerate(zip(outs, self._out_hosts)):
+            self._rt.cudaMemcpy(h, self._out_devs[i], c_size_t(o.nbytes), 1)
+            ctypes.memmove(o.ctypes.data_as(c_void_p), h, o.nbytes)
         return outs
 
 
@@ -278,9 +339,11 @@ class ObstaclePlugin:
         self._cfg = plugin_cfg
         self._model_dir = plugin_cfg.get("model_dir", "/models/obstacle")
         self._lock = threading.Lock()
+        self._load_lock = threading.Lock()
         self._executor = executor
         self._decision_threshold_m = float(plugin_cfg.get("decision_threshold_m", 2.0))
         self._output_topic_tpl = plugin_cfg.get("output_topic", "{input_topic}/obstacle")
+        self._lazy_load = bool(plugin_cfg.get("lazy_load", True))
         self._nodes: dict[str, _ObstacleDistanceNode] = {}
         self._indoor_eng: Optional[_TrtEngine] = None
         self._out_depth_eng: Optional[_TrtEngine] = None
@@ -289,29 +352,66 @@ class ObstaclePlugin:
         self._load_error = None
         self._load_status = "pending"
         try:
-            self._load_models()
+            if self._lazy_load:
+                # 懒加载：按模式按需加载，节省显存（室内/室外各只加载用到的引擎）
+                self._load_status = "ready"
+                log.info(f"[obstacle] lazy_load enabled: engines load on first {mode} frame"
+                         if False else "[obstacle] lazy_load enabled: 按模式按需加载引擎")
+            else:
+                self._load_models()
         except Exception as e:
             self._load_error = str(e)
             self._load_status = "error"
             log.error(f"[obstacle] model load failed: {e}", exc_info=True)
 
-    # ── 模型加载 ──────────────────────────────────────────────────────────
-    def _load_models(self):
+    # ── 模型加载（支持按模式懒加载）─────────────────────────────────────
+    def _load_indoor(self):
         ind = self._cfg.get("indoor", {})
-        out = self._cfg.get("outdoor", {})
-        # 室内：DA2 metric INT8 + isotonic
         eng_path = os.path.join(self._model_dir, ind.get("engine", "depth_anything_v2_metric_hypersim_vits_int8.trt"))
         calib_path = os.path.join(self._model_dir, ind.get("calib", "calib_isotonic_d_roi_min.json"))
-        self._indoor_eng = _TrtEngine(eng_path)
+        eng = _TrtEngine(eng_path)
         with open(calib_path) as f:
             cal = json.load(f)
-        self._indoor_knots = (np.asarray(cal["x_knots"], np.float64), np.asarray(cal["y_knots"], np.float64))
-        # 室外：depth + seg
-        self._out_depth_eng = _TrtEngine(os.path.join(self._model_dir, out.get("depth_engine", "yolo26n-depth_int8.trt")))
-        self._out_seg_eng = _TrtEngine(os.path.join(self._model_dir, out.get("seg_engine", "yolo26n-seg_fp16.trt")))
+        knots = (np.asarray(cal["x_knots"], np.float64), np.asarray(cal["y_knots"], np.float64))
+        self._indoor_eng, self._indoor_knots = eng, knots
+        log.info(f"[obstacle] indoor engine ready: {os.path.basename(eng_path)}")
+
+    def _load_outdoor(self):
+        out = self._cfg.get("outdoor", {})
+        dep = _TrtEngine(os.path.join(self._model_dir, out.get("depth_engine", "yolo26n-depth_int8.trt")))
+        seg = _TrtEngine(os.path.join(self._model_dir, out.get("seg_engine", "yolo26n-seg_fp16.trt")))
+        self._out_depth_eng, self._out_seg_eng = dep, seg
+        log.info(f"[obstacle] outdoor engines ready: {out.get('depth_engine')} + {out.get('seg_engine')}")
+
+    def _load_models(self):
+        self._load_indoor()
+        self._load_outdoor()
         self._load_status = "ready"
-        log.info(f"[obstacle] models ready: indoor={os.path.basename(eng_path)} "
-                 f"outdoor={out.get('depth_engine')} + {out.get('seg_engine')}")
+
+    def _ensure_engine(self, mode: str):
+        """按模式确保引擎已加载（懒加载路径），线程安全。"""
+        if self._load_error:
+            raise RuntimeError(self._load_error)
+        if mode == "indoor":
+            if self._indoor_eng is None:
+                with self._load_lock:
+                    if self._indoor_eng is None:
+                        try:
+                            self._load_indoor()
+                        except Exception as e:
+                            self._load_error = str(e)
+                            self._load_status = "error"
+                            raise
+        elif mode == "outdoor":
+            if self._out_depth_eng is None or self._out_seg_eng is None:
+                with self._load_lock:
+                    if self._out_depth_eng is None or self._out_seg_eng is None:
+                        try:
+                            self._load_outdoor()
+                        except Exception as e:
+                            self._load_error = str(e)
+                            self._load_status = "error"
+                            raise
 
     def get_tools(self) -> list:
         return TOOLS
@@ -320,10 +420,17 @@ class ObstaclePlugin:
     def dispatch(self, name: str, args: dict) -> dict | None:
         action = args.get("action") if name == self.PREFIX else name
         if action == "info":
+            loaded = []
+            if self._indoor_eng is not None:
+                loaded.append("indoor")
+            if self._out_depth_eng is not None and self._out_seg_eng is not None:
+                loaded.append("outdoor")
             return {
                 "name": "Obstacle",
                 "state": self._load_status,
                 "error": self._load_error,
+                "lazy_load": self._lazy_load,
+                "loaded": loaded,
                 "indoor": "DA2-Small metric-hypersim INT8 + ROI min + isotonic",
                 "outdoor": "yolo26n-depth INT8 + yolo26n-seg -> mask p5 + scale/bias",
                 "dispatch_rule": "png=indoor, jpg=outdoor",
@@ -420,6 +527,7 @@ class ObstaclePlugin:
 
     # ── 室内：DA2 metric INT8 + ROI min + isotonic ────────────────────────
     def _detect_indoor(self, bgr) -> tuple[float, dict]:
+        self._ensure_engine("indoor")
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         rgb = cv2.resize(rgb, (INDOOR_W, INDOOR_H), interpolation=cv2.INTER_CUBIC)
         rgb = (rgb - INDOOR_MEAN) / INDOOR_STD
@@ -437,6 +545,7 @@ class ObstaclePlugin:
 
     # ── 室外：yolo26n depth + seg ─────────────────────────────────────────
     def _detect_outdoor(self, bgr) -> tuple[float, dict]:
+        self._ensure_engine("outdoor")
         cfg = self._cfg.get("outdoor", {})
         min_conf = float(cfg.get("min_confidence", 0.25))
         pct = float(cfg.get("percentile", 5.0))
