@@ -21,6 +21,10 @@ plugins:
 
   obstacle:
     enabled: true
+    provider: local
+    url: ""
+    key: ""
+    model: ""
     decision_threshold_m: 2.0   # 准召线（P/R/F1 判定阈值）
     model_dir: /models/obstacle
     indoor:

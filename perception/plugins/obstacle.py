@@ -360,3 +360,7 @@ class ObstaclePlugin:
 
 def build_plugin(cfg: dict, executor) -> ObstaclePlugin:
     return ObstaclePlugin(cfg, executor)
+
+
+# 别名：ROS2/基准线使用 ObstacleDistancePlugin 名称
+ObstacleDistancePlugin = ObstaclePlugin
