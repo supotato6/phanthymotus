@@ -21,6 +21,7 @@ plugins:
 
   obstacle:
     enabled: true
+    decision_threshold_m: 2.0   # 准召线（P/R/F1 判定阈值）
     model_dir: /models/obstacle
     indoor:
       engine: depth_anything_v2_metric_hypersim_vits_int8.trt

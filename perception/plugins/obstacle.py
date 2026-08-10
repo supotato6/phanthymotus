@@ -163,6 +163,7 @@ class ObstaclePlugin:
         self._cfg = plugin_cfg
         self._model_dir = plugin_cfg.get("model_dir", "/models/obstacle")
         self._lock = threading.Lock()
+        self._decision_threshold_m = float(plugin_cfg.get("decision_threshold_m", 2.0))
         self._indoor_eng: Optional[_TrtEngine] = None
         self._out_depth_eng: Optional[_TrtEngine] = None
         self._out_seg_eng: Optional[_TrtEngine] = None
@@ -250,14 +251,17 @@ class ObstaclePlugin:
             log.error(f"[obstacle] detect failed: {e}", exc_info=True)
             return {"ok": False, "error": str(e)}
         elapsed_ms = round((time.time() - t0) * 1000, 1)
+        line_in = bool(dist < self._decision_threshold_m)
         log.info(f"[obstacle] detect: scene={image_path} mode={mode} "
-                 f"distance_m={round(float(dist), 3)} fallback={bool(info.get('fallback', False))} "
-                 f"elapsed_ms={elapsed_ms}")
+                 f"distance_m={round(float(dist), 3)} "
+                 f"line_{self._decision_threshold_m:g}m={'in' if line_in else 'out'} "
+                 f"fallback={bool(info.get('fallback', False))} elapsed_ms={elapsed_ms}")
         return {
             "ok": True,
             "mode": mode,
             "distance_m": round(float(dist), 3),
             "distance": round(float(dist), 3),
+            f"line_{self._decision_threshold_m:g}m": "in" if line_in else "out",
             "fallback": bool(info.get("fallback", False)),
             "image_path": image_path,
             "elapsed_ms": elapsed_ms,
