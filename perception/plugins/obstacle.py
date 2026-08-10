@@ -249,6 +249,10 @@ class ObstaclePlugin:
         except Exception as e:
             log.error(f"[obstacle] detect failed: {e}", exc_info=True)
             return {"ok": False, "error": str(e)}
+        elapsed_ms = round((time.time() - t0) * 1000, 1)
+        log.info(f"[obstacle] detect: scene={image_path} mode={mode} "
+                 f"distance_m={round(float(dist), 3)} fallback={bool(info.get('fallback', False))} "
+                 f"elapsed_ms={elapsed_ms}")
         return {
             "ok": True,
             "mode": mode,
@@ -256,7 +260,7 @@ class ObstaclePlugin:
             "distance": round(float(dist), 3),
             "fallback": bool(info.get("fallback", False)),
             "image_path": image_path,
-            "elapsed_ms": round((time.time() - t0) * 1000, 1),
+            "elapsed_ms": elapsed_ms,
         }
 
     # ── 室内：DA2 metric INT8 + ROI min + isotonic ────────────────────────
@@ -273,6 +277,7 @@ class ObstaclePlugin:
         d_roi_min = float(valid.min())
         xs, ys = self._indoor_knots
         pred = float(np.clip(np.interp(d_roi_min, xs, ys), INDOOR_CLIP[0], INDOOR_CLIP[1]))
+        log.info(f"[obstacle] indoor infer: d_roi_min={d_roi_min:.3f}m -> isotonic={pred:.3f}m")
         return pred, {"fallback": False}
 
     # ── 室外：yolo26n depth + seg ─────────────────────────────────────────
@@ -312,6 +317,8 @@ class ObstaclePlugin:
         vals = np.maximum(depth[valid].astype(np.float32) - offset, 0.0)
         d = float(np.percentile(vals, pct))
         pred = float(np.clip(scale * d + bias, 0, max_d))
+        log.info(f"[obstacle] outdoor infer: det={len(inst)} conf>={min_conf}:{len(sel)} "
+                 f"p{pct:g}={d:.3f}m -> scale*bias={pred:.3f}m")
         return pred, {"fallback": False}
 
     @staticmethod
