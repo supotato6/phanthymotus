@@ -40,7 +40,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["info", "detect"]},
+                "action": {"type": "string", "enum": ["info", "detect", "start", "stop", "config"]},
                 "image_path": {"type": "string", "description": "输入图片路径，扩展名决定室内/室外"},
                 "mode": {"type": "string", "enum": ["auto", "indoor", "outdoor"], "default": "auto"},
             },
@@ -212,11 +212,15 @@ class ObstaclePlugin:
             }
         if action == "detect":
             return self._detect(args)
-        return None
+        if action in ("start", "stop", "config"):
+            # 无状态插件：引擎在 init 时已加载，生命周期 action 仅回执状态
+            return {"ok": True, "action": action, "state": self._load_status,
+                    "name": "Obstacle", "error": self._load_error}
+        return {"ok": False, "error": f"unsupported action: {action}", "name": "Obstacle"}
 
     # ── 检测入口 ──────────────────────────────────────────────────────────
     def _detect(self, args: dict) -> dict:
-        image_path = (args.get("image_path") or "").strip()
+        image_path = (args.get("image_path") or args.get("image") or args.get("path") or "").strip()
         if not image_path:
             return {"ok": False, "error": "image_path is required"}
         if not os.path.exists(image_path):
@@ -249,6 +253,7 @@ class ObstaclePlugin:
             "ok": True,
             "mode": mode,
             "distance_m": round(float(dist), 3),
+            "distance": round(float(dist), 3),
             "fallback": bool(info.get("fallback", False)),
             "image_path": image_path,
             "elapsed_ms": round((time.time() - t0) * 1000, 1),
