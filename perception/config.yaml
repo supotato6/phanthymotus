@@ -37,10 +37,10 @@ plugins:
       seg_engine: yolo26n-seg_fp16.trt
       allowed_classes: [0, 1, 2, 3, 5, 7]
       min_confidence: 0.25
-      percentile: 5.0
+      percentile: 1.0      # 对齐 zeng pct1（近距更敏感），5 折扫描最优
       min_depth_m: 0.3
       max_depth_m: 80.0
       offset_m: 1.0
-      scale: 1.15
-      bias: -1.5
+      scale: 1.2          # zeng 风格；-2.0 比 zeng 原 -2.4 更优（F1@2m 0.5 / MAE 5.08）
+      bias: -2.0
       fallback_distance_m: 3.0
