@@ -104,3 +104,12 @@ Dockerfile 内已注入修复 TRT python 所需的 Jetson DLA/驱动库（镜像
 - **缓冲复用**：`_TrtEngine` 缓存 device/pinned-host 缓冲，跨帧复用，不再每帧 cudaMalloc/Free（消除分配抖动与碎片）。
 - **按模式懒加载**：`lazy_load: true`（默认开）——室内/室外引擎按需加载，只跑室内就不加载室外引擎，省显存；`info` 返回 `loaded` 列表。首帧会多 1-2s 加载时间。
 - 运行期系统内存基线（Jetson 8GB）：本服务约数百 MB，与 TTS/agent-core 共存时注意剩余内存；benchmark 前可停掉不需要的容器。
+
+## 室内 2m 推边（F1@2m 0.64 → 0.76）
+
+室内管线在 isotonic 回归后加 2m 准召线推边（zeng 同款机制）：
+- `d_roi_min < push_score_threshold_m(1.86)` → 近侧：pred = min(pred, decision_threshold_m - margin)
+- 否则 → 远侧：pred = max(pred, decision_threshold_m)
+- 标定 json 恢复为无 bias 全量 isotonic（推边接管边界，bias 只伤 MAE）
+
+TUM 2200 帧 5 折 CV：F1@2m=0.764±0.008（P=0.759 R=0.769），MAE=0.347；全量 0.764/MAE 0.31。

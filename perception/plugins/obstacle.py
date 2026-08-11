@@ -344,6 +344,10 @@ class ObstaclePlugin:
         self._decision_threshold_m = float(plugin_cfg.get("decision_threshold_m", 2.0))
         self._output_topic_tpl = plugin_cfg.get("output_topic", "{input_topic}/obstacle")
         self._lazy_load = bool(plugin_cfg.get("lazy_load", True))
+        _ind = plugin_cfg.get("indoor", {})
+        self._indoor_push_enabled = bool(_ind.get("push_enabled", True))
+        self._indoor_push_threshold = float(_ind.get("push_score_threshold_m", 1.86))
+        self._classification_margin_m = float(_ind.get("classification_margin_m", 0.001))
         self._nodes: dict[str, _ObstacleDistanceNode] = {}
         self._indoor_eng: Optional[_TrtEngine] = None
         self._out_depth_eng: Optional[_TrtEngine] = None
@@ -540,7 +544,15 @@ class ObstaclePlugin:
         d_roi_min = float(valid.min())
         xs, ys = self._indoor_knots
         pred = float(np.clip(np.interp(d_roi_min, xs, ys), INDOOR_CLIP[0], INDOOR_CLIP[1]))
-        log.info(f"[obstacle] indoor infer: d_roi_min={d_roi_min:.3f}m -> isotonic={pred:.3f}m")
+        # 2m 准召线推边（zeng 同款机制）：d_roi_min<tau -> 近侧压到线内，否则抬到线外
+        if self._indoor_push_enabled:
+            if d_roi_min < self._indoor_push_threshold:
+                pred = min(pred, self._decision_threshold_m - self._classification_margin_m)
+            else:
+                pred = max(pred, self._decision_threshold_m)
+            pred = float(np.clip(pred, INDOOR_CLIP[0], INDOOR_CLIP[1]))
+        log.info(f"[obstacle] indoor infer: d_roi_min={d_roi_min:.3f}m -> isotonic={np.interp(d_roi_min, xs, ys):.3f}m "
+                 f"push={'in' if d_roi_min < self._indoor_push_threshold else 'out'} -> pred={pred:.3f}m")
         return pred, {"fallback": False}
 
     # ── 室外：yolo26n depth + seg ─────────────────────────────────────────
