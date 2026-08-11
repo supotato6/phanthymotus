@@ -353,6 +353,7 @@ class ObstaclePlugin:
         self._out_depth_eng: Optional[_TrtEngine] = None
         self._out_seg_eng: Optional[_TrtEngine] = None
         self._indoor_knots = None
+        self._indoor_resid = None
         self._load_error = None
         self._load_status = "pending"
         try:
@@ -378,6 +379,12 @@ class ObstaclePlugin:
             cal = json.load(f)
         knots = (np.asarray(cal["x_knots"], np.float64), np.asarray(cal["y_knots"], np.float64))
         self._indoor_eng, self._indoor_knots = eng, knots
+        if "rx_knots" in cal and "ry_knots" in cal:
+            self._indoor_resid = (np.asarray(cal["rx_knots"], np.float64),
+                                  np.asarray(cal["ry_knots"], np.float64))
+            log.info(f"[obstacle] indoor resid correction loaded ({len(cal['rx_knots'])} knots)")
+        else:
+            self._indoor_resid = None
         log.info(f"[obstacle] indoor engine ready: {os.path.basename(eng_path)}")
 
     def _load_outdoor(self):
@@ -543,7 +550,11 @@ class ObstaclePlugin:
             return float(INDOOR_CLIP[1]), {"fallback": True}
         d_roi_min = float(valid.min())
         xs, ys = self._indoor_knots
-        pred = float(np.clip(np.interp(d_roi_min, xs, ys), INDOOR_CLIP[0], INDOOR_CLIP[1]))
+        base = float(np.interp(d_roi_min, xs, ys))
+        if self._indoor_resid is not None:
+            rx, ry = self._indoor_resid
+            base -= float(np.interp(base, rx, ry, left=0.0, right=0.0))
+        pred = float(np.clip(base, INDOOR_CLIP[0], INDOOR_CLIP[1]))
         # 2m 准召线推边（zeng 同款机制）：d_roi_min<tau -> 近侧压到线内，否则抬到线外
         if self._indoor_push_enabled:
             if d_roi_min < self._indoor_push_threshold:
@@ -551,7 +562,7 @@ class ObstaclePlugin:
             else:
                 pred = max(pred, self._decision_threshold_m)
             pred = float(np.clip(pred, INDOOR_CLIP[0], INDOOR_CLIP[1]))
-        log.info(f"[obstacle] indoor infer: d_roi_min={d_roi_min:.3f}m -> isotonic={np.interp(d_roi_min, xs, ys):.3f}m "
+        log.info(f"[obstacle] indoor infer: d_roi_min={d_roi_min:.3f}m -> base={base:.3f}m "
                  f"push={'in' if d_roi_min < self._indoor_push_threshold else 'out'} -> pred={pred:.3f}m")
         return pred, {"fallback": False}
 

@@ -113,3 +113,7 @@ Dockerfile 内已注入修复 TRT python 所需的 Jetson DLA/驱动库（镜像
 - 标定 json 恢复为无 bias 全量 isotonic（推边接管边界，bias 只伤 MAE）
 
 TUM 2200 帧 5 折 CV：F1@2m=0.764±0.008（P=0.759 R=0.769），MAE=0.347；全量 0.764/MAE 0.31。
+
+**残差校正（v2）**：isotonic 输出在 pred 空间存在 +0.14~0.31m 局部上偏（PAVA 线性插值所致），
+在标定 json 中加入 `rx_knots/ry_knots` 残差曲线：`base -= interp(base, rx, ry)`，再推边。
+组合后：F1@2m=0.764（不变），MAE 0.347→0.328（5 折）/0.284（全量）。
