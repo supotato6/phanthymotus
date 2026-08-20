@@ -58,7 +58,8 @@ RUN mkdir -p /models/vits2-mix/vits2/text /models/vits2-mix/frontend /models/vit
         curl -fsSL -o "tn_cache/$f" "${MODEL_BASE_URL}/tn_cache/$f"; \
     done && \
     echo "Model files:" && ls -lh G_B_final_int8.pth config.json && \
-    python3 -c "import site,os; p=os.path.join(site.getsitepackages()[0],'tn','chinese'); os.makedirs(p,exist_ok=True); open(os.path.join(p,'normalizer.py'),'w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n'); open(os.path.join(os.path.dirname(p),'__init__.py'),'w').close(); open(os.path.join(p,'__init__.py'),'w').close(); print('tn stub ok')" && \
+    python3 -c "import site,os; p=os.path.join(site.getsitepackages()[0],'tn','chinese'); os.makedirs(p,exist_ok=True); open(os.path.join(p,'normalizer.py'),'w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n'); open(os.path.join(os.path.dirname(p),'__init__.py'),'w').close(); open(os.path.join(p,'__init__.py'),'w').close(); print('tn chinese stub ok')" && \
+    python3 -c "import site,os; p=os.path.join(site.getsitepackages()[0],'tn','english'); os.makedirs(p,exist_ok=True); open(os.path.join(p,'normalizer.py'),'w').write('class Normalizer:\\n    def __init__(self,**kw):pass\\n    def normalize(self,t):return t\\n'); open(os.path.join(p,'__init__.py'),'w').close(); print('tn english stub ok')" && \
     mkdir -p /models/vits2-mix/nltk_data/taggers /models/vits2-mix/nltk_data/tokenizers /models/vits2-mix/nltk_data/corpora && \
     curl -fsSL -o /tmp/nltk_1.zip "${MODEL_BASE_URL}/nltk/averaged_perceptron_tagger_eng.zip" && \
     unzip -qo /tmp/nltk_1.zip -d /models/vits2-mix/nltk_data/taggers/ && rm /tmp/nltk_1.zip && \
